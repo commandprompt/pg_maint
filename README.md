@@ -12,4 +12,4 @@ For windows: https://pypi.python.org/pypi?:action=display&name=psutil#downloads
 
 ## TODOs
 1. Handle pg_stat_activity to be compatible across pg versions. 
-  9.1 uses procpid, current_query, but 9.2+ uses pid, query respectively
+9.1 uses procpid, current_query, but 9.2+ uses pid, query respectively
