@@ -1,5 +1,5 @@
 # pg_maint
-This python program performs PostgreSQL maintenance tasks and provides reporting capabilities
+This python program performs PostgreSQL maintenance tasks and provides reporting capabilities.  This program is compatible on linux and windows.
 
 (c) 2016, Command Prompt, Inc.
 
