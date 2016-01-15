@@ -19,7 +19,7 @@ All fields are optional except database and action:
 
 `-h <hostname or IP address> -d <database> -n <schema> -p <PORT> -t <type> -u <db user> -l <load threshold> -w <max rows> -a [action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT] -r [dry run] -s [smart mode] -v [verbose output]`
 
-## Examples:
+## Examples
 vacuum analyze for all user tables in the database but only if load is less than 20% and rows < 1 mil
 
 `./pg_maint.py -h localhost -d test -p 5433 -u postgres -a vacuum_analyze -l 20 -w 1000000`
@@ -35,7 +35,7 @@ Run report on entire test database:
 `./pg_maint.py -d test -a report`
 
 
-## Assumptions:
+## Assumptions
 1. db user defaults to postgres if not provided as parameter.
 2. Max rows defaults to 10 million if not provided as parameter 
 3. Password must be in local .pgpass file or client authentication changed to trust or peer
@@ -50,7 +50,6 @@ For analyze and vacuum analyze:
 
 1. Refresh tables with no recent analyze or autovacuum_analyze in the last 60 days.
 2. Refresh tables where pg_stat_user_tables.n_live_tup is less than half of pg_class.reltuples
-3. 
 
 For vacuum freeze:
 
