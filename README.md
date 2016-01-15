@@ -48,7 +48,7 @@ Run report on entire test database:
 -s (smart mode) dictates a filter algorithm to determine what tables will qualify for the maintenance commands.
 For analyze and vacuum analyze:
 
-1. Refresh tables with no recent analyze or autovacuum_analyze in the last 30 days.
+1. Refresh tables with no recent analyze or autovacuum_analyze in the last 60 days.
 2. Refresh tables where pg_stat_user_tables.n_live_tup is less than half of pg_class.reltuples
 3. 
 
