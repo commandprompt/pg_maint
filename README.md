@@ -54,3 +54,13 @@ For analyze and vacuum analyze:
 For vacuum freeze:
 
 1. Refresh tables where current high XID age divided by autovacuum_freeze_max_age > 70%.
+
+## Report logic
+1. Get database conflicts, deadlocks, and temp_files.
+2. Unused indexes are identified where there are less than 20 index scans and thee size of the table is > 100 MB.
+3. Bloated tables/indexes are identified where at least 20% of the table/index is bloated or the wasted bytes is > 1GB.
+4. See if archiving is getting behind by more than 1000 WAL files.
+5. Contrast PG memory configuration to recommended ones
+6. Identify orphaned large objects.
+7. List tables getting close to transaction wraparound (more than halfway to max freeze threshold).
+8. list tables that have not been analyzed or vacuumed in the last 60 days or whose size has grown significantly. 
