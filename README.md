@@ -23,11 +23,13 @@ All fields are optional except database and action:
 vacuum analyze for all user tables in the database but only if load is less than 20% and rows < 1 mil
 
 `./pg_maint.py -h localhost -d test -p 5433 -u postgres -a vacuum_analyze -l 20 -w 1000000`
+
  
-smart analyze for all user tables in specific schema, but only if load is less than 40% and rows < 1 mil
+Smart analyze for all user tables in specific schema, but only if load is less than 40% and rows < 1 mil
 
 `./pg_maint.py -h localhost -d test -n public -p 5433 -s -u postgres -a analyze -l 40 -w 1000000 `
 
-run report on entire test database:
+
+Run report on entire test database:
 
 `./pg_maint.py -d test -a report`
