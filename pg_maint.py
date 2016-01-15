@@ -27,9 +27,6 @@
 #
 # Description: This python utility program performs PostgreSQL maintenance tasks.
 #
-# Input:
-#    -c <directory where the pg_alert.conf file exists>
-#
 # Inputs: all fields are optional except database and action.
 # -h <hostname or IP address> -d <database> -n <schema> -p <PORT> -t <type> -u <db user> -l <load threshold> 
 # -w <max rows> -a [action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT] -r [dry run] -s [smart mode] -v [verbose output]
@@ -73,14 +70,9 @@
 #    Example cron job that does smart analyze commands for entire database every month at midnight:
 #    0 0 1 * * /usr/bin/python /path to file/python pg_maint.py -t smart -a analyze >> /my log path/pg_maint_`/bin/date +'\%Y\%m\%d'`.log
 #
-# NOTE: You must source the environment variables file in the crontab to get this program to work.
+# NOTE: You may have to source the environment variables file in the crontab to get this program to work.
 #          #!/bin/bash
 #          source /home/user/.bash_profile
-#       OR create a bash script and invoke it from there:
-#          export PATH=/usr/lib64/qt-3.3/bin:/usr/local/bin:/bin:/usr/bin:/usr/local/sbin:/usr/sbin:/sbin
-#          cd /localhost/home/postgres/pgalert
-#          ./pg_alert.py  -d -c /localhost/home/postgres/pgalert -l /localhost/home/postgres/pgalert
-#          exit 0
 #
 # Report logic:
 #  1. Get database conflicts, deadlocks, and temp_files.
