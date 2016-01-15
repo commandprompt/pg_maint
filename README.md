@@ -15,7 +15,8 @@ For windows: https://pypi.python.org/pypi?:action=display&name=psutil#downloads
 9.1 uses procpid, current_query, but 9.2+ uses pid, query respectively
 
 ## Inputs
-all fields are optional except database and action.
+All fields are optional except database and action.
+
 -h <hostname or IP address> -d <database> -n <schema> -p <PORT> -t <type> -u <db user> -l <load threshold> -w <max rows> -a [action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT] -r [dry run] -s [smart mode] -v [verbose output]
 
 ## Examples:
