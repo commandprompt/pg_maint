@@ -74,7 +74,7 @@ class maint:
         self.dir_delim         = ''
         self.totalmem          = -1
         self.totalmem_prettyGB = -1
-        
+        self.pgbindir          = ''
 
         # db config stuff
         self.archive_mode      = ''
@@ -104,10 +104,10 @@ class maint:
         cmdargs = str(argv)
 
         if os.name == 'posix':
-            self.opsys = 'POSIX'
+            self.opsys = 'posix'
             self.dir_delim = '/'
         elif os.name == 'nt':
-            self.opsys = 'NT'
+            self.opsys = 'nt'
             self.dir_delim = '\\'
         else:
             return maint_globals.ERROR, "Unsupported platform."
@@ -135,7 +135,7 @@ class maint:
             print ("connection string: %s" % self.connstring)
 
         # Make sure psql is in the path
-        if self.opsys == 'POSIX':
+        if self.opsys == 'posix':
             cmd = "which psql"
         else:
             # assume windows
@@ -158,6 +158,12 @@ class maint:
         mem = virtual_memory()
         self.totalmem = mem.total
         self.totalmem_prettyGB = mem.total / (1024*1024*1024) 	        
+
+        # get pg bind directory from pg_config
+        rc, results = self.get_pgbindir()
+        if rc <> maint_globals.SUCCESS:
+            errors = "rc=%d results=%s" % (rc,results)
+	    return rc, errors                  
 
 	# Validate parameters
         rc, errors = self.validate_parms()	
@@ -401,7 +407,7 @@ class maint:
     # psql -p 5432 -t veda -c "select count(*)from pg_stat_activity"
     def executecmd(self, cmd, expect):
         if self.verbose:
-            print "executing --> %s" % cmd
+            print "executecmd --> %s" % cmd
             
         # NOTE: try and catch does not work for Popen    
         try:
@@ -445,6 +451,8 @@ class maint:
         
         if rc == 2:
             return maint_globals.ERROR2, err
+        elif rc == 127:
+            return maint_globals.ERROR2, err        
         elif err <> "":
             # do nothing since INFO information is returned here for analyze commands
             # return maint_globals.ERROR, err
@@ -515,9 +523,32 @@ class maint:
         return maint_globals.SUCCESS, str(results)
 
     ###########################################################
+    def get_pgbindir(self):
+
+        self.pgbindir   = ''
+        
+        cmd = "pg_config | grep BINDIR"
+        
+        rc, results = self.executecmd(cmd, True)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "unable to get PG Bind Directory.  rc=%d %s\n" % (rc, results)
+            aline = "%s" % (errors)         
+            
+            self.writeout(aline)
+            return rc, errors
+        
+        results = results.split('=')
+        self.pgbindir   = results[1].strip()
+        
+        if self.verbose:
+            print "PG Bind Directory = %s" % self.pgbindir
+            
+        return maint_globals.SUCCESS, str(results)
+
+    ###########################################################
     def get_load(self):
         
-        if os.name == 'posix':
+        if self.opsys == 'posix':
             cmd = "cat /proc/cpuinfo | grep processor | wc -l"
             rc, results = self.executecmd(cmd, True)
             if rc <> maint_globals.SUCCESS:
@@ -873,9 +904,8 @@ class maint:
             if self.verbose:
                 print "table=%s  index=%s  tablesize=%s  indexsize=%s  indexscans=%d" % (atable, aindex, tablesize, indexsize, indexscans)
 
-            if conflicts > 0 or deadlocks > 0 or temp_files > 0:
-                count = count + 1
-                print "Unused index candidate: table=%s  index=%s  table_size=%s  index_size=%s index_scans=%d" % (atable, aindex, tablesize, indexsize, indexscans)
+            count = count + 1
+            print "Unused index candidate: table=%s  index=%s  table_size=%s  index_size=%s index_scans=%d" % (atable, aindex, tablesize, indexsize, indexscans)
 
         f.close() 
     
@@ -889,7 +919,7 @@ class maint:
         
         rc, results = self.get_readycnt()
         if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get unused indexes: %d %s\nsql=%s\n" % (rc, results, sql)
+	    errors = "Unable to get archiving status: %d %s\n" % (rc, results)
             aline = "%s" % (errors)         
             self.writeout(aline)
             return rc, errors     
@@ -919,10 +949,10 @@ class maint:
         else:
             user_clause = " -U %s " % self.dbuser
             
-        cmd = "vacuumlo -n %s %s" % (user_clause, self.database)
+        cmd = "%s/vacuumlo -n %s %s" % (self.pgbindir, user_clause, self.database)
         rc, results = self.executecmd(cmd, False)
         if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get unused indexes: %d %s\nsql=%s\n" % (rc, results, sql)
+	    errors = "Unable to get orphaned large objects: %d %s\ncmd=%s\n" % (rc, results, cmd)
             aline = "%s" % (errors)         
             self.writeout(aline)
             return rc, errors     
@@ -948,7 +978,7 @@ class maint:
         cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
         rc, results = self.executecmd(cmd, False)
         if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get user table stats: %d %s\nsql=%s\n" % (rc, results, sql)
+	    errors = "Unable to get user table stats: %d %s\ncmd=%s\n" % (rc, results, cmd)
             aline = "%s" % (errors)         
             self.writeout(aline)
             return rc, errors     
@@ -985,7 +1015,7 @@ class maint:
         print ""
         
         # handle vacuum analyze candidates     
-        sql = "select n.nspname || '.' || c.relname as ddl, last_analyze, last_autoanalyze, last_vacuum, last_autovacuum, u.n_live_tup::bigint, c.reltuples::bigint, round((u.n_live_tup::float / CASE WHEN c.reltuples = 0 THEN 1.0 ELSE c.reltuples::float  END) * 100) as pct from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where t.schemaname = n.nspname and t.tablename = c.relname and c.relname = u.relname and n.nspname not in ('information_schema','pg_catalog') and (((c.reltuples > 0 and round((u.n_live_tup::float / c.reltuples::float) * 100) < 50)) OR ((last_vacuum is null and last_autovacuum is null and last_analyze is null and last_autoanalyze is null ) or (now()::date  - last_vacuum::date > 60 AND now()::date - last_autovacuum::date > 60 AND now()::date  - last_analyze::date > 60 AND now()::date  - last_autoanalyze::date > 60))) order by n.nspname, c.relname"
+        sql = "select n.nspname || '.' || c.relname as ddl, last_analyze, last_autoanalyze, last_vacuum, last_autovacuum, u.n_live_tup::bigint, c.reltuples::bigint, round((u.n_live_tup::float / CASE WHEN c.reltuples = 0 THEN 1.0 ELSE c.reltuples::float  END) * 100) as pct from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where c.relnamespace = n.oid and n.nspname = t.schemaname and t.tablename = c.relname and t.schemaname = u.schemaname and t.tablename = u.relname and n.nspname not in ('information_schema','pg_catalog') and (((c.reltuples > 0 and round((u.n_live_tup::float / c.reltuples::float) * 100) < 50)) OR ((last_vacuum is null and last_autovacuum is null and last_analyze is null and last_autoanalyze is null ) or (now()::date  - last_vacuum::date > 60 AND now()::date - last_autovacuum::date > 60 AND now()::date  - last_analyze::date > 60 AND now()::date  - last_autoanalyze::date > 60))) order by n.nspname, c.relname"
 
         cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
         rc, results = self.executecmd(cmd, False)
