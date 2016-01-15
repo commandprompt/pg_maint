@@ -24,6 +24,10 @@ vacuum analyze for all user tables in the database but only if load is less than
 
 `./pg_maint.py -h localhost -d test -p 5433 -u postgres -a vacuum_analyze -l 20 -w 1000000`
 
+Same thing as previous one, but do a dry run.  This is useful to see wht commands will be executed, or is also useful for generating DDL so you can run it manually.
+
+`./pg_maint.py -h localhost -d test -p 5433 -u postgres -a vacuum_analyze -l 20 -w 1000000 -r`
+
  
 Smart analyze for all user tables in specific schema, but only if load is less than 40% and rows < 1 mil
 
