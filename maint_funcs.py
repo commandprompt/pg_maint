@@ -40,6 +40,7 @@ import smtplib
 import subprocess
 from subprocess import Popen, PIPE
 import psutil
+import platform
 from psutil import virtual_memory
 # import psycopg2
 
@@ -71,10 +72,14 @@ class maint:
         self.workfile          = ''
         self.workfile_deferred = ''
         self.tempfile          = ''
+        self.reportfile        = ''
         self.dir_delim         = ''
         self.totalmem          = -1
         self.totalmem_prettyGB = -1
         self.pgbindir          = ''
+        self.html_format       = False
+        self.programdir        = ''
+        self.imageURL          = "https://cloud.githubusercontent.com/assets/339156/12404356/c5c9f374-be08-11e5-8cfb-2ab6df0eb4b0.jpg"
 
         # db config stuff
         self.archive_mode      = ''
@@ -84,9 +89,10 @@ class maint:
         self.work_mem          = -1
         self.maint_work_mem    = -1
         self.eff_cache_size    = -1
+        
 
     ###########################################################
-    def set_dbinfo(self, action, dbhost, dbport, dbuser, database, schema, smart_mode, load_threshold, max_rows, dry_run, verbose, argv):
+    def set_dbinfo(self, action, dbhost, dbport, dbuser, database, schema, smart_mode, load_threshold, max_rows, html_format, dry_run, verbose, argv):
         self.action         = action.upper()
         self.dbhost         = dbhost
         self.dbport         = dbport
@@ -96,6 +102,7 @@ class maint:
         self.smart_mode     = smart_mode
         self.load_threshold = -1 if load_threshold == "" else int(load_threshold)
         self.max_rows       = 10000000 if max_rows == "" else int(max_rows)
+        self.html_format    = html_format
         self.dry_run        = dry_run
         self.verbose        = verbose
          
@@ -115,6 +122,7 @@ class maint:
         self.workfile          = "%s%s%s_stats.sql" % (self.tempdir, self.dir_delim, self.pid)
         self.workfile_deferred = "%s%s%s_stats_deferred.sql" % (self.tempdir, self.dir_delim, self.pid)
         self.tempfile          = "%s%s%s_temp.sql" % (self.tempdir, self.dir_delim, self.pid)
+        self.reportfile        = "%s%s%s_report.html" % (self.tempdir, self.dir_delim, self.pid)
         
         # construct the connection string that will be used in all database requests        
         # do not provide host name and/or port if not provided
@@ -133,6 +141,8 @@ class maint:
             print ("The total numbers of args passed to the script: %d " % total)
             print ("Args list: %s " % cmdargs)
             print ("connection string: %s" % self.connstring)
+
+        self.programdir = sys.path[0]
 
         # Make sure psql is in the path
         if self.opsys == 'posix':
@@ -154,6 +164,11 @@ class maint:
             errors = "rc=%d results=%s" % (rc,results)
 	    return rc, errors               
 
+        ############################################################################
+        # NOTE: this is the only place we use psutils (virtual_memory()
+        # Consider removing it and getting windows physical memory some other way
+        # to avoid reliance on separate install of psutils package
+        ############################################################################        
         # get total memory  total memory is in bytes
         mem = virtual_memory()
         self.totalmem = mem.total
@@ -234,102 +249,6 @@ class maint:
         valuefloat = "%.2f" % valueMB
         return Decimal(valuefloat)
 
-    ###########################################################
-    def do_report_pgmemory(self):
-
-        totalmemGB = self.totalmem / (1024*1024*1024)
-        
-        # shared_buffers:        
-        # primitive logic: make shared buffers minimum 4GB or maximum 12GB or 25% of total memory
-        # newer versions of PG seem to be more efficient with higher values, so logic is:
-        # if pg 9.3 or lower max is 8GB, if pg 9.4 or higher 12 GB max
-        rc, results = self.get_pgversion()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results        
-        version = Decimal(results)
-        if version < 9.13:
-           MAXGB = 8
-        else:
-           MAXGB = 12
-        MINGB = 2
-        percent25GB = totalmemGB * 0.25
-        shared_buffersGB = self.shared_buffers / 1024
-        
-        if percent25GB > MAXGB:
-            recommended_shared_buffers = MAXGB
-        elif percent25GB < MINGB:
-            recommended_shared_buffers = percent25GB
-        else:
-            recommended_shared_buffers = percent25GB
-        if self.verbose:
-            print "shared_buffers = %d percent25GB=%d  recommended=%d  totalmemGB=%d" % (self.shared_buffers, percent25GB, recommended_shared_buffers, totalmemGB)
-        
-        # maintenance_work_mem
-        # current pg versions dont perform better with high values, since there is a hard-coded limit of the this memory that will be used,
-        # effectively making memory here unavailable for usage elsewhere, so general rule:
-        # MIN = 0.128GB, MAX 8 GB
-        MIN = 0.128
-        MAX = 8
-        if totalmemGB < 4:
-            recommended_maintenance_work_mem = MIN
-        elif totalmemGB < 8:
-            recommended_maintenance_work_mem = 0.256            
-        elif totalmemGB < 16:
-            recommended_maintenance_work_mem = 0.512
-        elif totalmemGB < 32:
-            recommended_maintenance_work_mem = 1            
-        elif totalmemGB < 64:
-            recommended_maintenance_work_mem = 2                        
-        elif totalmemGB < 96:
-            recommended_maintenance_work_mem = 4
-        else:
-            recommended_maintenance_work_mem = MAX
-            
-        # work_mem
-        # need knowledge of SQL workload to do this effectivly, so for now, consider max connections and total memory
-        if self.max_connections < 200:
-            if totalmemGB < 4:
-                recommended_work_mem = 0.016
-            elif totalmemGB < 8:
-                recommended_work_mem = 0.032            
-            elif totalmemGB < 16:
-                recommended_work_mem = 0.064
-            elif totalmemGB < 32:
-                recommended_work_mem = 0.128        
-            elif totalmemGB < 64:
-                recommended_work_mem = 0.256                        
-            else:
-                recommended_work_mem = 0.512
-        else:
-            if totalmemGB < 8:
-                recommended_work_mem = 0.016            
-            elif totalmemGB < 16:
-                recommended_work_mem = 0.032
-            elif totalmemGB < 32:
-                recommended_work_mem = 0.064        
-            elif totalmemGB < 64:
-                recommended_work_mem = 0.128                        
-            else:
-                recommended_work_mem = 0.256
-        
-        # effective_cache_size: settings shows it in 8kb chunks
-        # set it to 75% of memory
-        recommended_effective_cache_size = .75 * totalmemGB
-
-        print "Current and recommended PG Memory configuration settings."        
-        print "*** Consider changing these values if they differ significantly ***"        
-        print "effective_cache_size: %04d GB  recommended: %04d GB" % (self.eff_cache_size  / 1024, recommended_effective_cache_size)                        
-        if self.shared_buffers < 1000:
-           # show in MB instead of GB
-           print "shared_buffers:       %04d MB  recommended: %04d MB" % (self.shared_buffers, recommended_shared_buffers * 1024)
-        else:   
-            print "shared_buffers:       %04d GB  recommended: %04d GB" % (self.shared_buffers / 1024, recommended_shared_buffers)
-        print "maintenance_work_mem: %04d MB  recommended: %04d MB" % (self.maint_work_mem, recommended_maintenance_work_mem * 1024)
-        print "work_mem:             %04d MB  recommended: %04d MB" % (self.work_mem, recommended_work_mem * 1000)
-
-        
-        return maint_globals.SUCCESS, ""
-
 
     ###########################################################
     def writeout(self,aline):
@@ -378,7 +297,7 @@ class maint:
                 self.max_connections = int(setting)
             elif name == 'shared_buffers':
                 # shared_buffers in 8kilobytes units from select from pg_settings, so convert to megabytes, but show gives user friendly form (10GB, 10MB, 10KB, etc.)
-                # self.shared_buffers = int(rcsetting) / 8192
+                # self.shared_buffers = int(setting) / 8192
                 rc = self.convert_humanfriendly_to_MB(setting)
                 self.shared_buffers = rc
             elif name == 'maintenance_work_mem':
@@ -526,9 +445,12 @@ class maint:
     def get_pgbindir(self):
 
         self.pgbindir   = ''
-        
-        cmd = "pg_config | grep BINDIR"
-        
+
+        if self.opsys == 'posix':
+            cmd = "pg_config | grep BINDIR"
+        else:
+            cmd = "pg_config | find \"BINDIR\""
+
         rc, results = self.executecmd(cmd, True)
         if rc <> maint_globals.SUCCESS:
 	    errors = "unable to get PG Bind Directory.  rc=%d %s\n" % (rc, results)
@@ -604,6 +526,635 @@ class maint:
             return maint_globals.SUCCESS, "Current load (%.2f%%) < Threshold load (%d%%)" % (load, self.load_threshold)
 
     ###########################################################
+    def initreport(self):
+
+        # get the host name
+        if self.dbhost == '':
+            # tuples = os.uname()
+            tuples = platform.uname()
+            hostname = tuples[1]
+        else:
+            hostname = self.dbhost
+            
+        now = str(time.strftime("%c"))
+
+        f = open(self.reportfile, "w")
+        
+        contextline = "<H2><p>Host: %s</p><p>Database: %s</p><p>Generated %s</p></H2>\n" % (hostname, self.database, now)
+        info = \
+            "<!DOCTYPE html>\n" + \
+	    "<HTML>\n" + \
+	    "<HEAD>\n" + \
+	    "<TITLE>pg_maint Maintenance Report</TITLE>\n" + \
+	    "</HEAD>\n" + \
+	    "<BODY BGCOLOR=\"FFFFFF\">\n" + \
+	    "<div id='container'>\n" + \
+	    "<img src='" + self.imageURL + "' style='float: left;'/>\n" + \
+	    "<p><H1>pg_maint Maintenance Report</H1></p>\n" + \
+	    "</div>\n" + contextline + \
+	    "<a href=\"https://github.com/commandprompt/pg_maint\">pg_maint</a>  is available on github.\n" + \
+	    "Send me mail at <a href=\"mailto:michael@commandprompt.com\"> support@commandprompt.com</a>.\n" + \
+            "<HR>\n"
+        f.write(info)
+        f.close()
+    
+        return maint_globals.SUCCESS, ""    
+
+    ###########################################################
+    def finalizereport(self):
+        f = open(self.reportfile, "a")
+        info = "</BODY>\n</HTML>"
+        f.write(info)
+        f.close()
+        
+        return maint_globals.SUCCESS, ""            
+
+    ###########################################################
+    def appendreport(self, astring):
+        f = open(self.reportfile, "a")
+        f.write(astring)
+        f.close()
+        
+        return maint_globals.SUCCESS, ""            
+
+    ###########################################################
+    def do_report(self):
+        if self.action not in ('REPORT'):
+            return maint_globals.NOTICE, "N/A"    
+
+        if self.html_format:
+            rc,results = self.initreport()
+            if rc <> maint_globals.SUCCESS:
+                return rc, results
+
+        # get pg memory settings
+        rc, results = self.do_report_pgmemory()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results
+
+        print ""
+
+        # get archiving status
+        rc, results = self.do_report_archivingstatus()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results
+
+        print ""
+
+        # get database conflicts if applicable
+        rc, results = self.do_report_conflicts()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results
+        print ""
+
+        # get bloated tables and indexes
+        rc, results = self.do_report_bloated()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results
+
+        print ""
+        
+        # get unused indexes
+        rc, results = self.do_report_unusedindexes()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results
+
+        print ""
+        
+        # get count of orphaned large objects
+        rc, results = self.do_report_orphanedlargeobjects()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results
+
+        print ""
+       
+        # get count of orphaned large objects
+        rc, results = self.do_report_tablemaintenance()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results
+
+        print ""
+
+        if self.html_format:
+            rc,results = self.finalizereport()
+            if rc <> maint_globals.SUCCESS:
+                return rc, results
+
+            print "html report file generated: %s" % self.reportfile
+            
+        return maint_globals.SUCCESS, ""
+
+    ###########################################################
+    def do_report_pgmemory(self):
+
+        totalmemGB = self.totalmem / (1024*1024*1024)
+        
+        # shared_buffers:        
+        # primitive logic: make shared buffers minimum 4GB or maximum 12GB or 25% of total memory
+        # newer versions of PG seem to be more efficient with higher values, so logic is:
+        # if pg 9.3 or lower max is 8GB, if pg 9.4 or higher 12 GB max
+        rc, results = self.get_pgversion()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results        
+        version = Decimal(results)
+        if version < 9.13:
+           MAXGB = 8
+        else:
+           MAXGB = 12
+        MINGB = 2
+        percent25GB = totalmemGB * 0.25
+        shared_buffersGB = self.shared_buffers / 1024
+        
+        if percent25GB > MAXGB:
+            recommended_shared_buffers = MAXGB
+        elif percent25GB < MINGB:
+            recommended_shared_buffers = percent25GB
+        else:
+            recommended_shared_buffers = percent25GB
+        if self.verbose:
+            print "shared_buffers = %d percent25GB=%d  recommended=%d  totalmemGB=%d" % (self.shared_buffers, percent25GB, recommended_shared_buffers, totalmemGB)
+        
+        # maintenance_work_mem
+        # current pg versions dont perform better with high values, since there is a hard-coded limit of the this memory that will be used,
+        # effectively making memory here unavailable for usage elsewhere, so general rule:
+        # MIN = 0.128GB, MAX 8 GB
+        MIN = 0.128
+        MAX = 8
+        if totalmemGB < 4:
+            recommended_maintenance_work_mem = MIN
+        elif totalmemGB < 8:
+            recommended_maintenance_work_mem = 0.256            
+        elif totalmemGB < 16:
+            recommended_maintenance_work_mem = 0.512
+        elif totalmemGB < 32:
+            recommended_maintenance_work_mem = 1            
+        elif totalmemGB < 64:
+            recommended_maintenance_work_mem = 2                        
+        elif totalmemGB < 96:
+            recommended_maintenance_work_mem = 4
+        else:
+            recommended_maintenance_work_mem = MAX
+            
+        # work_mem
+        # need knowledge of SQL workload to do this effectivly, so for now, consider max connections and total memory
+        if self.max_connections < 200:
+            if totalmemGB < 4:
+                recommended_work_mem = 0.016
+            elif totalmemGB < 8:
+                recommended_work_mem = 0.032            
+            elif totalmemGB < 16:
+                recommended_work_mem = 0.064
+            elif totalmemGB < 32:
+                recommended_work_mem = 0.128        
+            elif totalmemGB < 64:
+                recommended_work_mem = 0.256                        
+            else:
+                recommended_work_mem = 0.512
+        else:
+            if totalmemGB < 8:
+                recommended_work_mem = 0.016            
+            elif totalmemGB < 16:
+                recommended_work_mem = 0.032
+            elif totalmemGB < 32:
+                recommended_work_mem = 0.064        
+            elif totalmemGB < 64:
+                recommended_work_mem = 0.128                        
+            else:
+                recommended_work_mem = 0.256
+        
+        # effective_cache_size: settings shows it in 8kb chunks
+        # set it to 75% of memory
+        recommended_effective_cache_size = .75 * totalmemGB
+
+        print "Current and recommended PG Memory configuration settings. Total Memory = %s GB" % totalmemGB        
+        print "*** Consider changing these values if they differ significantly ***"        
+        totalf = "PG Memory Values are primarily based on total physical memory available: %04d GB" % (totalmemGB)
+        print totalf
+        totalf = "<H4>" + totalf + "</H4>"
+        if self.html_format:
+            self.appendreport(totalf)        
+        effective_cache_size_f = "%04d GB" % (self.eff_cache_size  / 1024)
+        recommended_effective_cache_size_f = "%04d GB" % recommended_effective_cache_size
+        print "effective_cache_size:    %s  recommended: %s" % (effective_cache_size_f, recommended_effective_cache_size_f)        
+
+        if self.shared_buffers < 1000:
+            # show in MB instead of GB
+            shared_buffers_f             = "%04d MB" % self.shared_buffers
+            recommended_shared_buffers_f = "%04d MB" % (recommended_shared_buffers * 1024)
+            print "shared_buffers:          %s  recommended: %s" % (shared_buffers_f, recommended_shared_buffers_f)
+        else:  
+            shared_buffers_f             = "%04d GB" % (self.shared_buffers / 1024)
+            recommended_shared_buffers_f = "%04d GB" %  recommended_shared_buffers    
+            print "shared_buffers:          %s  recommended: %s" % (shared_buffers_f, recommended_shared_buffers_f)
+
+        maintenance_work_mem_f              = "%04d MB" % self.maint_work_mem
+        recommended_maintenance_work_mem_f  = "%04d MB" % (recommended_maintenance_work_mem * 1000)
+        work_mem_f                          = "%04d MB" % self.work_mem
+        recommended_work_mem_f              = "%04d MB" % (recommended_work_mem * 1000)
+        print "maintenance_work_mem:    %s  recommended: %s" % (maintenance_work_mem_f,  recommended_maintenance_work_mem_f )
+        print "work_mem:                %s  recommended: %s" % (work_mem_f, recommended_work_mem_f )            
+ 
+        if self.html_format:            
+            html = "<table border=\"1\">\n" + "<tr>" + "<th align=\"center\">field</th>\n" + "<th align=\"center\">current value</th>\n" + "<th align=\"center\">recommended value</th>\n" + "</tr>\n"
+            html += "<tr valign=\"top\">\n" + "<td align=\"left\">effective_cache_size</td>\n" + "<th align=\"center\">" + str(effective_cache_size_f) + "</th>\n" + "<th align=\"center\">" + str(recommended_effective_cache_size_f) + "</th>\n" + "</tr>\n" 
+            html +="<tr valign=\"top\">\n" + "<td align=\"left\">shared_buffers</td>\n" + "<th align=\"center\">" + str(shared_buffers_f) + "</th>\n" + "<th align=\"center\">" + str(recommended_shared_buffers_f) + "</th>\n" + "</tr>\n" 
+            html +="<tr valign=\"top\">\n" + "<td align=\"left\">maintenance_work_mem</td>\n" + "<th align=\"center\">" + str(maintenance_work_mem_f) + "</th>\n" + "<th align=\"center\">" + str(recommended_maintenance_work_mem_f) + "</th>\n" + "</tr>\n" 
+            html +="<tr valign=\"top\">\n" + "<td align=\"left\">work_mem</td>\n" + "<th align=\"center\">" + str(work_mem_f) + "</th>\n" + "<th align=\"center\">" + str(recommended_work_mem_f) + "</th>\n" + "</tr>\n" + "</table>" 
+
+            self.appendreport(html)
+            
+
+        return maint_globals.SUCCESS, ""
+
+    ###########################################################
+    def do_report_bloated(self):
+        '''
+         SELECT schemaname, tablename, ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) AS tbloat,  CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END AS wastedbytes,  iname,   ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) AS ibloat, CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedibytes FROM (SELECT  schemaname, tablename, cc.reltuples, cc.relpages, bs,  CEIL((cc.reltuples*((datahdr+ma- (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,  COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages, COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta FROM ( SELECT   ma,bs,schemaname,tablename,   (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,   (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2 FROM ( SELECT schemaname, tablename, hdr, ma, bs, SUM((1-null_frac)*avg_width) AS datawidth, MAX(null_frac) AS maxfracsum,  hdr+( SELECT 1+COUNT(*)/8 FROM pg_stats s2 WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename ) AS nullhdr FROM pg_stats s, ( SELECT (SELECT current_setting('block_size')::NUMERIC) AS bs, CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr, CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma FROM (SELECT version() AS v) AS foo ) AS constants  GROUP BY 1,2,3,4,5 ) AS foo) AS rs  JOIN pg_class cc ON cc.relname = rs.tablename  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' LEFT JOIN pg_index i ON indrelid = cc.oid LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid ) AS sml where ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) > 20 OR ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) > 20 or CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END > 10737418240 OR CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END > 10737418240 ORDER BY wastedbytes DESC;
+        '''
+
+        # first get count, then optionally retrieve the data
+        sql = "SELECT count(*) FROM (SELECT  schemaname, tablename, cc.reltuples, cc.relpages, bs,  CEIL((cc.reltuples*((datahdr+ma- (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,  COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages, COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta FROM ( SELECT   ma,bs,schemaname,tablename,   (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,   (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2 FROM ( SELECT schemaname, tablename, hdr, ma, bs, SUM((1-null_frac)*avg_width) AS datawidth, MAX(null_frac) AS maxfracsum,  hdr+( SELECT 1+COUNT(*)/8 FROM pg_stats s2 WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename ) AS nullhdr FROM pg_stats s, ( SELECT (SELECT current_setting('block_size')::NUMERIC) AS bs, CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr, CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma FROM (SELECT version() AS v) AS foo ) AS constants  GROUP BY 1,2,3,4,5 ) AS foo) AS rs  JOIN pg_class cc ON cc.relname = rs.tablename  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' LEFT JOIN pg_index i ON indrelid = cc.oid LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid ) AS sml where ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) > 20 OR ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) > 20 or CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END > 10737418240 OR CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END > 10737418240"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get table/index bloat count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        if int(results) == 0:
+            if self.html_format:
+                self.appendreport("<H3>No bloated tables were found.</H3>")
+            print "No bloated tables were found."
+            return maint_globals.SUCCESS, ""
+
+        sql = "SELECT schemaname, tablename, ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) AS tbloat,  CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END AS wastedbytes,  iname,   ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) AS ibloat, CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedibytes FROM (SELECT  schemaname, tablename, cc.reltuples, cc.relpages, bs,  CEIL((cc.reltuples*((datahdr+ma- (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,  COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages, COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta FROM ( SELECT   ma,bs,schemaname,tablename,   (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,   (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2 FROM ( SELECT schemaname, tablename, hdr, ma, bs, SUM((1-null_frac)*avg_width) AS datawidth, MAX(null_frac) AS maxfracsum,  hdr+( SELECT 1+COUNT(*)/8 FROM pg_stats s2 WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename ) AS nullhdr FROM pg_stats s, ( SELECT (SELECT current_setting('block_size')::NUMERIC) AS bs, CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr, CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma FROM (SELECT version() AS v) AS foo ) AS constants  GROUP BY 1,2,3,4,5 ) AS foo) AS rs  JOIN pg_class cc ON cc.relname = rs.tablename  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' LEFT JOIN pg_index i ON indrelid = cc.oid LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid ) AS sml where ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) > 20 OR ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) > 20 or CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END > 10737418240 OR CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END > 10737418240 ORDER BY wastedbytes DESC"
+        if self.html_format:                
+            cmd = "psql %s --html -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
+        else:
+            cmd = "psql %s -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)                
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get table/index bloat: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        
+        if self.html_format:
+            self.appendreport("<H4>Bloated tables/indexes are identified where at least 20% of the table/index is bloated or the wasted bytes is > 10 GB.</H4>\n")        
+        print "Bloated tables/indexes are identified where at least 20% of the table/index is bloated or the wasted bytes is > 10 GB."
+        
+        f = open(self.tempfile, "r")    
+        lineno = 0
+        bloated = 0
+        for line in f:
+            lineno = lineno + 1
+            if self.verbose:
+                print "%d line=%s" % (lineno,line)
+            aline = line.strip()
+            if len(aline) < 1:
+                continue
+            elif '(0 rows)' in aline:
+                continue
+                
+            # bloated table or index
+            bloated = bloated + 1
+            if self.html_format:
+                msg = "%s" % aline
+                self.appendreport(msg)
+            print "%s\n" % (aline)
+
+        f.close() 
+    
+        return maint_globals.SUCCESS, ""
+
+    ###########################################################
+    def do_report_conflicts(self):
+    
+        # NOTE: only applies to PG versions greater or equal to 9.1.  9.2 has additional fields of interest: deadlocks and temp_files
+        rc, results = self.get_pgversion()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results        
+        version = Decimal(results)
+        if version < 9.1:
+            print "No database conflicts found."
+            return maint_globals.SUCCESS, ""        
+    
+        if version == 9.1:
+            sql="select datname, conflicts from pg_stat_database"
+        else:
+            sql="select datname, conflicts, deadlocks, temp_files from pg_stat_database"        
+
+        cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get database stats: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        f = open(self.tempfile, "r")    
+        lineno = 0
+        count  = 0
+        for line in f:
+            lineno = lineno + 1
+            if self.verbose:
+                print "%d line=%s" % (lineno,line)
+            aline = line.strip()
+            if len(aline) < 1:
+                continue
+
+            deadlocks = -1
+            temp_files = -1
+            fields = aline.split('|')
+            if version == 9.1:
+                adatabase   = fields[0].strip()
+                conflicts   = int(fields[1].strip())
+            else:
+                adatabase   = fields[0].strip()
+                conflicts   = int(fields[1].strip())
+                deadlocks   = int(fields[2].strip())
+                temp_files  = int(fields[3].strip())                
+
+            if self.verbose:
+                print "db=%s  conflicts=%d  deadlocks=%d  temp_files=%d" % (adatabase, conflicts, deadlocks, temp_files)
+
+            if conflicts > 0 or deadlocks > 0 or temp_files > 0:
+                count = count + 1
+                if self.html_format:
+                    msg = "<H4>Database Conflicts found: db=%s  conflicts=%d  deadlocks=%d  temp_files=%d</H4>" % (adatabase, conflicts, deadlocks, temp_files)
+                    self.appendreport(msg)                
+                print "Database Conflicts found: db=%s  conflicts=%d  deadlocks=%d  temp_files=%d" % (adatabase, conflicts, deadlocks, temp_files)
+
+        f.close() 
+    
+        if count == 0:
+            if self.html_format:
+                self.appendreport("<H3>No database conflicts were found.</H3>")        
+            print "No database conflicts were found."
+    
+        return maint_globals.SUCCESS, ""    
+        
+    ###########################################################
+    def do_report_unusedindexes(self):
+    
+        # NOTE: no version problems identified yet
+        rc, results = self.get_pgversion()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results        
+        version = Decimal(results)
+     
+        # first get count, then optionally retrieve the data
+        sql="SELECT count(*) FROM pg_stat_user_indexes ui JOIN pg_index i ON ui.indexrelid = i.indexrelid WHERE NOT indisunique AND idx_scan < 20 AND pg_relation_size(relid) > 1024 * 1024 * 100"    
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get unused indexes count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        if int(results) == 0:
+            if self.html_format:
+                self.appendreport("<H3>No unused index candidates were found.</H3>")        
+            print "No unused index candidates were found."
+            return maint_globals.SUCCESS, ""
+
+        # Criteria is indexes that are used less than 20 times and whose table size is > 100MB
+        sql="SELECT schemaname || '.' || relname AS table, indexrelname AS index, pg_size_pretty(pg_relation_size(relid)) as table_size, pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size, idx_scan as index_scans FROM pg_stat_user_indexes ui JOIN pg_index i ON ui.indexrelid = i.indexrelid WHERE NOT indisunique AND idx_scan < 20 AND pg_relation_size(relid) > 1024 * 1024 * 100 ORDER BY pg_relation_size(i.indexrelid) / nullif(idx_scan, 0) DESC NULLS FIRST, pg_relation_size(i.indexrelid) DESC"
+        if self.html_format:        
+            cmd = "psql %s --html -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)                        
+        else:
+            cmd = "psql %s -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)                
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get unused indexes: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        if self.html_format:
+            self.appendreport("<H4>Unused indexes are identified where there are less than 20 index scans and the size of the table is > 100 MB.</H4>\n")        
+        print "Unused indexes are identified where there are less than 20 index scans and thee size of the table is > 100 MB."
+
+        f = open(self.tempfile, "r")    
+        lineno = 0
+        count  = 0
+        for line in f:
+            lineno = lineno + 1
+            if self.verbose:
+                print "%d line=%s" % (lineno,line)
+            aline = line.strip()
+            if len(aline) < 1:
+                continue
+            elif '(0 rows)' in aline:
+                continue                
+
+            if lineno == 1:
+                if self.html_format:
+                    self.appendreport(aline)    
+                print "                 %s" % aline
+            else:
+                print "%s" % aline
+                if self.html_format:
+                    self.appendreport(aline)
+        f.close() 
+        return maint_globals.SUCCESS, ""    
+        
+    ###########################################################
+    def do_report_archivingstatus(self):
+        
+        rc, results = self.get_readycnt()
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get archiving status: %d %s\n" % (rc, results)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        readycnt = int(results)
+        
+        if self.verbose:
+            print "Ready Count = %d" % readycnt
+        
+        if readycnt > 1000:
+            if self.html_format:
+                msg = "<H3>Archiving is behind more than 1000 WAL files. Current count - %d</H3>" % readycnt
+                self.appendreport(msg)                        
+            print "Archiving is behind more than 1000 WAL files. Current count - %d" % readycnt
+        elif readycnt == 0:
+            if self.archive_mode == 'on':
+                if self.html_format:
+                    msg = "<H3>Archiving is on and currently up-to-date.</H3>"
+                    self.appendreport(msg)        
+                print "Archiving is on and currently up-to-date."
+            else:
+                if self.html_format:
+                    msg = "<H3>Archiving is off and not applicable.</H3>"
+                    self.appendreport(msg)        
+                print "Archiving is off and not applicable."    
+        else:
+            if self.html_format:
+                msg = "<H3>Archiving is working and not too far behind. WALs waiting to be ardchived=%d</H3>" % readycnt
+                self.appendreport(msg)        
+            msg = "Archiving is working and not too far behind. WALs waiting to be ardchived=%d" % readycnt
+            print msg
+
+        return maint_globals.SUCCESS, ""            
+    
+    ###########################################################
+    def do_report_orphanedlargeobjects(self):
+
+        if self.dbuser == '':
+            user_clause = " "
+        else:
+            user_clause = " -U %s " % self.dbuser
+            
+        cmd = "%s/vacuumlo -n %s %s" % (self.pgbindir, user_clause, self.database)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get orphaned large objects: %d %s\ncmd=%s\n" % (rc, results, cmd)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        
+        if self.verbose:
+            print "vacuumlo results: rc=%d  %s" % (rc,results)
+        
+        # expecting substring like this --> "Would remove 35 large objects from database "agmednet.core.image"."
+        numobjects = (results.split("Would remove"))[1].split("large objects")[0]
+
+        if int(numobjects) == 0:
+            if self.html_format:
+	        msg = "<H3>No orphaned large objects were found.</H3>"
+                self.appendreport(msg)        
+            print "No orphaned large objects were found."
+        else:
+            if self.html_format:
+	        msg = "<H3>%d orphaned large objects were found.  Consider running vacuumlo to remove them.</H3>" % int(numobjects)
+                self.appendreport(msg)                
+            print "%d orphaned large objects were found.  Consider running vacuumlo to remove them." % int(numobjects)
+            
+        return maint_globals.SUCCESS, ""            
+        
+    ###########################################################
+    def do_report_tablemaintenance(self):        
+
+        # first get count, then optionally retrieve the data
+        sql="WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select count(c.*) from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' and pg_table_size(c.oid) > 1073741824 and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 50"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get vacuum freeze candidate count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        if int(results) == 0:
+            if self.html_format:
+                self.appendreport("<H3>No vacuum freeze candidates were found.</H3>")        
+            print "No vacuum freeze candidates were found."
+        else:
+            sql = "WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select s.setting, n.nspname as schema, c.relname as table, age(c.relfrozenxid) as xid_age, pg_size_pretty(pg_table_size(c.oid)) as table_size, round((age(c.relfrozenxid)::float / s.setting::float) * 100) as pct from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' and pg_table_size(c.oid) > 1073741824 and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 50 ORDER BY age(c.relfrozenxid)"
+            if self.html_format:        
+                cmd = "psql %s --html -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)                        
+            else:
+                cmd = "psql %s -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)                
+            rc, results = self.executecmd(cmd, False)
+            if rc <> maint_globals.SUCCESS:
+       	        errors = "Unable to get user table stats: %d %s\ncmd=%s\n" % (rc, results, cmd)
+                aline = "%s" % (errors)         
+                self.writeout(aline)
+                return rc, errors     
+
+            if self.html_format:
+                self.appendreport("<H4>List of tables that are past the midway point of going into transaction wraparound mode and therefore candidates for manual vacuum freeze.</H4>")        
+            print "List of tables that are past the midway point of going into transaction wraparound mode and therefore candidates for manual vacuum freeze." 
+    
+            f = open(self.tempfile, "r")    
+            lineno = 0
+            count  = 0
+            for line in f:
+                lineno = lineno + 1
+                if self.verbose:
+                    print "%d line=%s" % (lineno,line)
+                aline = line.strip()
+                if len(aline) < 1:
+                    continue
+                elif '(0 rows)' in aline:
+                    continue                             
+                elif '(0 rows)' in aline:
+                    continue                
+
+                if lineno == 1:
+                    if self.html_format:
+                         self.appendreport(aline)
+                    print "%s" % aline
+                else:
+                    if self.html_format:
+                         self.appendreport(aline)
+                    print "%s" % aline
+    
+            f.close() 
+
+        print ""
+        
+        # handle vacuum analyze candidates     
+        # first get count, then optionally retrieve the data
+        sql="select count(*) from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where c.relnamespace = n.oid and n.nspname = t.schemaname and t.tablename = c.relname and t.schemaname = u.schemaname and t.tablename = u.relname and n.nspname not in ('information_schema','pg_catalog') and (((c.reltuples > 0 and round((u.n_live_tup::float / c.reltuples::float) * 100) < 50)) OR ((last_vacuum is null and last_autovacuum is null and last_analyze is null and last_autoanalyze is null ) or (now()::date  - last_vacuum::date > 60 AND now()::date - last_autovacuum::date > 60 AND now()::date  - last_analyze::date > 60 AND now()::date  - last_autoanalyze::date > 60)))"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get vacuum analyze candidate count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        if int(results) == 0:
+            if self.html_format:
+                self.appendreport("<H3>No vacuum analyze candidates were found.</H3>")        
+            print "No vacuum analyze candidates were found."
+            return maint_globals.SUCCESS, ""
+        
+        sql = "select n.nspname || '.' || c.relname as table, last_analyze, last_autoanalyze, last_vacuum, last_autovacuum, u.n_live_tup::bigint, c.reltuples::bigint, round((u.n_live_tup::float / CASE WHEN c.reltuples = 0 THEN 1.0 ELSE c.reltuples::float  END) * 100) as pct from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where c.relnamespace = n.oid and n.nspname = t.schemaname and t.tablename = c.relname and t.schemaname = u.schemaname and t.tablename = u.relname and n.nspname not in ('information_schema','pg_catalog') and (((c.reltuples > 0 and round((u.n_live_tup::float / c.reltuples::float) * 100) < 50)) OR ((last_vacuum is null and last_autovacuum is null and last_analyze is null and last_autoanalyze is null ) or (now()::date  - last_vacuum::date > 60 AND now()::date - last_autovacuum::date > 60 AND now()::date  - last_analyze::date > 60 AND now()::date  - last_autoanalyze::date > 60))) order by n.nspname, c.relname"
+
+        if self.html_format:                
+            cmd = "psql %s --html -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
+        else:
+            cmd = "psql %s -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get user table stats: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        if self.html_format:
+            self.appendreport("<H4>List of tables that have not been analyzed or vacuumed (manual and auto) in the last 60 days or whose size has changed significantly (n_live_tup/reltuples * 100 < 50) and therefore candidates for manual vacuum analyze.</H4>")        
+        print "List of tables that have not been analyzed or vacuumed (manual and auto) in the last 60 days or whose size has changed significantly (n_live_tup/reltuples * 100 < 50) and therefore candidates for manual vacuum analyze."
+        
+        f = open(self.tempfile, "r")    
+        lineno = 0
+        count  = 0
+        for line in f:
+            lineno = lineno + 1
+            if self.verbose:
+                print "%d line=%s" % (lineno,line)
+            aline = line.strip()
+            if len(aline) < 1:
+                continue
+            elif '(0 rows)' in aline:
+                continue                
+
+            if lineno == 1:
+                if self.html_format:
+                    self.appendreport(aline)
+                print "                      %s" % aline
+            else:
+                if self.html_format:
+                    self.appendreport(aline)                
+                print "%s" % aline
+
+        f.close() 
+    
+        return maint_globals.SUCCESS, ""            
+        
+    ###########################################################
     def do_vac_and_analyze(self):
 
         rc, results = self.check_load()
@@ -617,7 +1168,10 @@ class maint:
         sql = "select '%s ' || n.nspname || '.' || c.relname || ';' as ddl from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where t.schemaname = n.nspname and t.tablename = c.relname and c.relname = u.relname %s and n.nspname not in ('information_schema','pg_catalog') and c.reltuples > %d order by n.nspname, c.relname" \
         % (self.actstring, self.schemaclause, self.max_rows)
         
-        cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.workfile_deferred)
+        if self.html_format:
+            cmd = "psql %s --html -t -c \"%s\" > %s" % (self.connstring, sql, self.workfile_deferred)        
+        else:
+            cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.workfile_deferred)
         rc, results = self.executecmd(cmd, False)
         if rc <> maint_globals.SUCCESS:
 	    errors = "Unable to get deferred sql: %d %s\n" % (rc,results)
@@ -692,374 +1246,6 @@ class maint:
         print "%s work file commands completed" % (adate)    
         
         return maint_globals.SUCCESS, ""
-
-    ###########################################################
-    def do_report(self):
-        if self.action not in ('REPORT'):
-            return maint_globals.NOTICE, "N/A"    
-
-        # get database conflicts if applicable
-        rc, results = self.do_report_conflicts()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-        print ""
-
-        # get bloated tables and indexes
-        rc, results = self.do_report_bloated()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
-        
-        # get unused indexes
-        rc, results = self.do_report_unusedindexes()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
-        
-        # get archiving status
-        rc, results = self.do_report_archivingstatus()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
- 
-        # get pg memory settings
-        rc, results = self.do_report_pgmemory()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
-        
-        # get count of orphaned large objects
-        rc, results = self.do_report_orphanedlargeobjects()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
-       
-        # get count of orphaned large objects
-        rc, results = self.do_report_tablemaintenance()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
-        
-        return maint_globals.SUCCESS, ""
-
-    ###########################################################
-    def do_report_bloated(self):
-
-        sql = "SELECT current_database(), schemaname, tablename, ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) AS tbloat,  CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END AS wastedbytes,  iname,   ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) AS ibloat, CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedibytes FROM (SELECT  schemaname, tablename, cc.reltuples, cc.relpages, bs,  CEIL((cc.reltuples*((datahdr+ma- (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,  COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages, COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta FROM ( SELECT   ma,bs,schemaname,tablename,   (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,   (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2 FROM ( SELECT schemaname, tablename, hdr, ma, bs, SUM((1-null_frac)*avg_width) AS datawidth, MAX(null_frac) AS maxfracsum,  hdr+( SELECT 1+COUNT(*)/8 FROM pg_stats s2 WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename ) AS nullhdr FROM pg_stats s, ( SELECT (SELECT current_setting('block_size')::NUMERIC) AS bs, CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr, CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma FROM (SELECT version() AS v) AS foo ) AS constants  GROUP BY 1,2,3,4,5 ) AS foo) AS rs  JOIN pg_class cc ON cc.relname = rs.tablename  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' LEFT JOIN pg_index i ON indrelid = cc.oid LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid) AS sml ORDER BY wastedbytes DESC"
-
-        cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get table/index bloat: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-
-        print "Bloated tables/indexes are identified where at least 20% of the table/index is bloated or the wasted bytes is > 1GB."
-        f = open(self.tempfile, "r")    
-        lineno = 0
-        bloated = 0
-        for line in f:
-            lineno = lineno + 1
-            if self.verbose:
-                print "%d line=%s" % (lineno,line)
-            aline = line.strip()
-            if len(aline) < 1:
-                continue
-                
-            fields = aline.split('|')
-            adatabase     = fields[0].strip()
-            aschema       = fields[1].strip()
-            atable        = fields[2].strip()
-            pctbloated    = Decimal(fields[3].strip())
-            wastedbytes   = long(fields[4].strip())
-            index         = fields[5].strip()
-            pctbloatedix  = Decimal(fields[6].strip())
-            wastedbytesix = long(fields[7].strip())
-            if self.verbose:
-                print "db=%s schema=%s table=%s bloated=%.2f wasted=%d" % (adatabase, aschema, atable, pctbloated, wastedbytes)
-
-            if pctbloated > 20.0 or wastedbytes > 1073741824:
-                bloated = bloated + 1
-                print "Bloated table: %s.%s.%s %.2f%% bloated   wasted bytes=%d" % (adatabase, aschema, atable, pctbloated, wastedbytes)               
-            if pctbloatedix > 20.0 or wastedbytesix > 1073741824:
-                bloated = bloated + 1
-                print "Bloated index: %s.%s.%s.%s %.2f%% bloated   wasted bytes=%d" % (adatabase, aschema, atable, index, pctbloatedix, wastedbytesix)                               
-
-        f.close() 
-    
-        if bloated == 0:
-            print "No bloated tables were found."
-            
-        return maint_globals.SUCCESS, ""
-
-    ###########################################################
-    def do_report_conflicts(self):
-    
-        # NOTE: only applies to PG versions greater or equal to 9.1.  9.2 has additional fields of interest: deadlocks and temp_files
-        rc, results = self.get_pgversion()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results        
-        version = Decimal(results)
-        if version < 9.1:
-            print "No database conflicts found."
-            return maint_globals.SUCCESS, ""        
-    
-        if version == 9.1:
-            sql="select datname, conflicts from pg_stat_database"
-        else:
-            sql="select datname, conflicts, deadlocks, temp_files from pg_stat_database"        
-
-        cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get database stats: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-
-        f = open(self.tempfile, "r")    
-        lineno = 0
-        count  = 0
-        for line in f:
-            lineno = lineno + 1
-            if self.verbose:
-                print "%d line=%s" % (lineno,line)
-            aline = line.strip()
-            if len(aline) < 1:
-                continue
-
-            deadlocks = -1
-            temp_files = -1
-            fields = aline.split('|')
-            if version == 9.1:
-                adatabase   = fields[0].strip()
-                conflicts   = int(fields[1].strip())
-            else:
-                adatabase   = fields[0].strip()
-                conflicts   = int(fields[1].strip())
-                deadlocks   = int(fields[2].strip())
-                temp_files  = int(fields[3].strip())                
-
-            if self.verbose:
-                print "db=%s  conflicts=%d  deadlocks=%d  temp_files=%d" % (adatabase, conflicts, deadlocks, temp_files)
-
-            if conflicts > 0 or deadlocks > 0 or temp_files > 0:
-                count = count + 1
-                print "Database Conflicts found: db=%s  conflicts=%d  deadlocks=%d  temp_files=%d" % (adatabase, conflicts, deadlocks, temp_files)
-
-        f.close() 
-    
-        if count == 0:
-            print "No database conflicts were found."
-    
-        return maint_globals.SUCCESS, ""    
-        
-    ###########################################################
-    def do_report_unusedindexes(self):
-    
-        # NOTE: no version problems identified yet
-        rc, results = self.get_pgversion()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results        
-        version = Decimal(results)
-    
-        # Criteria is indexes that are used less than 20 times and whose table size is > 100MB
-        sql="SELECT schemaname || '.' || relname AS table, indexrelname AS index, pg_size_pretty(pg_relation_size(relid)) as table_size, pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size, idx_scan as index_scans FROM pg_stat_user_indexes ui JOIN pg_index i ON ui.indexrelid = i.indexrelid WHERE NOT indisunique AND idx_scan < 20 AND pg_relation_size(relid) > 1024 * 1024 * 100 ORDER BY pg_relation_size(i.indexrelid) / nullif(idx_scan, 0) DESC NULLS FIRST, pg_relation_size(i.indexrelid) DESC"
-
-        cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get unused indexes: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-
-        print "Unused indexes are identified where there are less than 20 index scans and thee size of the table is > 100 MB."
-
-        f = open(self.tempfile, "r")    
-        lineno = 0
-        count  = 0
-        for line in f:
-            lineno = lineno + 1
-            if self.verbose:
-                print "%d line=%s" % (lineno,line)
-            aline = line.strip()
-            if len(aline) < 1:
-                continue
-
-            fields = aline.split('|')
-            atable     = fields[0].strip()
-            aindex     = fields[1].strip()
-            tablesize  = fields[2].strip()
-            indexsize  = fields[3].strip()
-            indexscans = int(fields[4].strip())
-
-            if self.verbose:
-                print "table=%s  index=%s  tablesize=%s  indexsize=%s  indexscans=%d" % (atable, aindex, tablesize, indexsize, indexscans)
-
-            count = count + 1
-            print "Unused index candidate: table=%s  index=%s  table_size=%s  index_size=%s index_scans=%d" % (atable, aindex, tablesize, indexsize, indexscans)
-
-        f.close() 
-    
-        if count == 0:
-            print "No unused index candidates were found."
-    
-        return maint_globals.SUCCESS, ""    
-        
-    ###########################################################
-    def do_report_archivingstatus(self):
-        
-        rc, results = self.get_readycnt()
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get archiving status: %d %s\n" % (rc, results)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-
-        readycnt = int(results)
-        
-        if self.verbose:
-            print "Ready Count = %d" % readycnt
-        
-        if readycnt > 1000:
-            print "Archiving is behind more than 1000 WAL files. Current count - %d" % readycnt
-        elif readycnt == 0:
-            if self.archive_mode == 'on':
-                print "Archiving is on but currently up-to-date."
-            else:
-                print "Archiving is off and not applicable."    
-        else:
-            print "Archiving is working and not too far behind. WALs waiting to be ardchived=%d" % readycnt        
-
-        return maint_globals.SUCCESS, ""            
-    
-    ###########################################################
-    def do_report_orphanedlargeobjects(self):
-
-        if self.dbuser == '':
-            user_clause = " "
-        else:
-            user_clause = " -U %s " % self.dbuser
-            
-        cmd = "%s/vacuumlo -n %s %s" % (self.pgbindir, user_clause, self.database)
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get orphaned large objects: %d %s\ncmd=%s\n" % (rc, results, cmd)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        
-        if self.verbose:
-            print "vacuumlo results: rc=%d  %s" % (rc,results)
-        
-        # expecting substring like this --> "Would remove 35 large objects from database "agmednet.core.image"."
-        numobjects = (results.split("Would remove"))[1].split("large objects")[0]
-
-        if int(numobjects) == 0:
-            print "No orphaned large objects were found."
-        else:
-            print "%d orphaned large objects were found.  Consider running vacuumlo to remove them."        
-            
-        return maint_globals.SUCCESS, ""            
-        
-    ###########################################################
-    def do_report_tablemaintenance(self):        
-
-        sql = "WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select s.setting, n.nspname as schema, c.relname as table, age(c.relfrozenxid) as xid_age, pg_size_pretty(pg_table_size(c.oid)) as table_size, round((age(c.relfrozenxid)::float / s.setting::float) * 100) as pct from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' and pg_table_size(c.oid) > 1073741824 and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 50 ORDER BY age(c.relfrozenxid)"
-
-        cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get user table stats: %d %s\ncmd=%s\n" % (rc, results, cmd)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-
-        print "List of tables that are past the midway point of going into transaction wraparound mode and therefore candidates for manual vacuum freeze." 
-        
-        f = open(self.tempfile, "r")    
-        lineno = 0
-        count  = 0
-        for line in f:
-            lineno = lineno + 1
-            if self.verbose:
-                print "%d line=%s" % (lineno,line)
-            aline = line.strip()
-            if len(aline) < 1:
-                continue
-
-            fields     = aline.split('|')
-            setting    = fields[0].strip()
-            schema     = fields[1].strip()
-            table      = fields[2].strip()
-            xid_age    = fields[3].strip()
-            table_size = fields[4].strip()
-            pct        = fields[5].strip()
-
-            count = count + 1
-            print "%s.%s  max freeze age=%s  xid_age=%s  table_size=%s  pct=%s" % (schema, atable, setting, xid_age, table_size, pct)
-
-        f.close() 
-    
-        if count == 0:
-            print "No vacuum freeze candidates were found."        
-       
-        print ""
-        
-        # handle vacuum analyze candidates     
-        sql = "select n.nspname || '.' || c.relname as ddl, last_analyze, last_autoanalyze, last_vacuum, last_autovacuum, u.n_live_tup::bigint, c.reltuples::bigint, round((u.n_live_tup::float / CASE WHEN c.reltuples = 0 THEN 1.0 ELSE c.reltuples::float  END) * 100) as pct from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where c.relnamespace = n.oid and n.nspname = t.schemaname and t.tablename = c.relname and t.schemaname = u.schemaname and t.tablename = u.relname and n.nspname not in ('information_schema','pg_catalog') and (((c.reltuples > 0 and round((u.n_live_tup::float / c.reltuples::float) * 100) < 50)) OR ((last_vacuum is null and last_autovacuum is null and last_analyze is null and last_autoanalyze is null ) or (now()::date  - last_vacuum::date > 60 AND now()::date - last_autovacuum::date > 60 AND now()::date  - last_analyze::date > 60 AND now()::date  - last_autoanalyze::date > 60))) order by n.nspname, c.relname"
-
-        cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get user table stats: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-
-        print "List of tables that have not been analyzed or vacuumed (manual and auto) in the last 60 days or whose size has changed significantly (n_live_tup/reltuples * 100 < 50)"
-        print "and therefore candidates for manual vacuum analyze."
-
-        f = open(self.tempfile, "r")    
-        lineno = 0
-        count  = 0
-        for line in f:
-            lineno = lineno + 1
-            if self.verbose:
-                print "%d line=%s" % (lineno,line)
-            aline = line.strip()
-            if len(aline) < 1:
-                continue
-
-            fields     = aline.split('|')
-            table            = fields[0].strip()
-            last_analyze     = fields[1].strip()
-            last_autoanalyze = fields[2].strip()
-            last_vacuum      = fields[3].strip()
-            last_autovacuum  = fields[4].strip()
-            n_live_tup       = fields[5].strip()
-            reltuples        = fields[6].strip()
-            pct              = fields[7].strip()
-
-            count = count + 1
-            print "%s last_analyze=%s last_autoanalyze=%s last_vacuum=%s last_autovacuum=%s  n_live_tup=%s  reltuples=%s  pct=%s"  \
-            % (table, last_analyze, last_autoanalyze, last_vacuum, last_autovacuum, n_live_tup, reltuples, pct)
-
-        f.close() 
-    
-        if count == 0:
-            print "No vacuum analyze candidates were found."        
-        
-        return maint_globals.SUCCESS, ""            
-        
                 
 ################################################################################################################
 
@@ -1069,5 +1255,5 @@ other things to consider for reporting, although they are redundant with zabbix
 2. Long running queries 
 3. Lock waits
 4. checkpoints too frequent or infrequent (depends on logging)
-
+5. Warn if #connections close to max connections
 '''
