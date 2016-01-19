@@ -28,8 +28,8 @@
 # Description: This python utility program performs PostgreSQL maintenance tasks.
 #
 # Inputs: all fields are optional except database and action.
-# -h <hostname or IP address> -d <database> -n <schema> -p <PORT> -t <type> -u <db user> -l <load threshold> 
-# -w <max rows> -a [action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT] -r [dry run] -s [smart mode] -v [verbose output]
+# -h <hostname or IP address> -d <database> -n <schema> -p <PORT> -t <type> -u <db user> -l <load threshold> -w <max rows> 
+# -a [action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT] -m [html format] -r [dry run] -s [smart mode] -v [verbose output]
 #
 # Examples:
 #
@@ -49,6 +49,8 @@
 # Requirements:
 #   1. psql client 
 #   2. psutil (apt-get install python-psutil or yum install python-psutil). For windows: https://pypi.python.org/pypi?:action=display&name=psutil#downloads
+#
+# Download: git clone https://github.com/commandprompt/pg_maint.git pg_maint
 #
 # Assumptions:
 # 1. db user defaults to postgres if not provided as parameter.
@@ -92,6 +94,15 @@
 # TODOs:
 #    1. Handle pg_stat_activity to be compatible across pg versions. 
 #       9.1 uses procpid, current_query, but 9.2+ uses pid, query respectively
+#    2. jd: we want pg_maint to optionally work with pg_agent to create a job to do vacuum freeze
+#       so we could say pg_maint --vacuum-freeze --schedule '01/20/2015 2:00AM';
+#       and pg_agent would schedule that 
+#       including the following would be awesome pg_maint --report --html 
+#       also consider driving it not by parms but by ini file
+#       [db01]
+#       database: mydb
+#       action: vacuum_freeze
+#    3. Consider removing need to install psutils, since we only use it one place -->virtual_memory()
 #
 # History:
 # who did it            Date            did what
@@ -126,7 +137,8 @@ def setupOptionParser():
     parser.add_option("-s", "--smart_mode",     dest="smart_mode", help="Smart Mode",                           default=False, action="store_true")    
     parser.add_option("-l", "--load_threshold", dest="load_threshold", help="Load Threshold",                   default="",metavar="LOAD_THRESHOLD")        
     parser.add_option("-w", "--max_rows",       dest="max_rows", help="Max Rows",                               default="",metavar="MAX_ROWS")            
-    parser.add_option("-r", "--dry_run",        dest="dry_run", help="Dry Run Only",                            default=False, action="store_true")
+    parser.add_option("-m", "--html",           dest="html", help="html report format",                         default=False, action="store_true")    
+    parser.add_option("-r", "--dry_run",        dest="dry_run", help="Dry Run Only",                            default=False, action="store_true")    
     parser.add_option("-v", "--verbose",        dest="verbose", help="Verbose Output",                          default=False, action="store_true")                   
         
     return parser
@@ -144,7 +156,8 @@ optionParser   = setupOptionParser()
 pg = maint()
 
 # Load and validate parameters
-rc, errors = pg.set_dbinfo(options.action, options.dbhost, options.dbport, options.dbuser, options.database, options.schema, options.smart_mode, options.load_threshold, options.max_rows, options.dry_run, options.verbose, sys.argv)
+rc, errors = pg.set_dbinfo(options.action, options.dbhost, options.dbport, options.dbuser, options.database, options.schema, \
+                           options.smart_mode, options.load_threshold, options.max_rows, options.html, options.dry_run, options.verbose, sys.argv)
 if rc <> maint_globals.SUCCESS:
     print errors
     optionParser.print_help()
