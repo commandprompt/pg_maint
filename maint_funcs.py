@@ -39,10 +39,10 @@ from decimal import *
 import smtplib
 import subprocess
 from subprocess import Popen, PIPE
-import psutil
 import platform
-from psutil import virtual_memory
 # import psycopg2
+# import psutil
+#from psutil import virtual_memory
 
 # custom globals file
 import maint_globals
@@ -74,12 +74,12 @@ class maint:
         self.tempfile          = ''
         self.reportfile        = ''
         self.dir_delim         = ''
-        self.totalmem          = -1
-        self.totalmem_prettyGB = -1
+        self.totalmemGB        = -1
         self.pgbindir          = ''
         self.html_format       = False
         self.programdir        = ''
         self.imageURL          = "https://cloud.githubusercontent.com/assets/339156/12404356/c5c9f374-be08-11e5-8cfb-2ab6df0eb4b0.jpg"
+        self.slaves            = []
 
         # db config stuff
         self.archive_mode      = ''
@@ -164,15 +164,8 @@ class maint:
             errors = "rc=%d results=%s" % (rc,results)
 	    return rc, errors               
 
-        ############################################################################
-        # NOTE: this is the only place we use psutils (virtual_memory()
-        # Consider removing it and getting windows physical memory some other way
-        # to avoid reliance on separate install of psutils package
-        ############################################################################        
         # get total memory  total memory is in bytes
-        mem = virtual_memory()
-        self.totalmem = mem.total
-        self.totalmem_prettyGB = mem.total / (1024*1024*1024) 	        
+        self.totalmemGB = self.get_physicalmem()
 
         # get pg bind directory from pg_config
         rc, results = self.get_pgbindir()
@@ -206,6 +199,32 @@ class maint:
             return maint_globals.ERROR, "Invalid Action.  Valid actions are: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, or REPORT."                
  
         return maint_globals.SUCCESS, ""
+
+
+    ###########################################################
+    def get_physicalmem(self):
+
+        if self.opsys == 'posix':
+            cmd = "free -g | grep Mem: | /usr/bin/awk '{ total=$2; } END { print \"total=\" total  }'"
+            rc, results = self.executecmd(cmd, True)
+            if rc <> maint_globals.SUCCESS:
+    	        errors = "unable to get Total Physical Memory.  rc=%d %s\n" % (rc, results)
+                aline = "%s" % (errors)         
+                self.writeout(aline)
+                return rc, errors
+            results = results.split('=')
+            totalmem_prettyGB = int(results[1].strip())
+        else:
+            # must be windows, nt
+            from psutil import virtual_memory            
+            mem = virtual_memory()
+            totalmem_prettyGB = mem.total / (1024*1024*1024) 	            
+
+        if self.verbose:
+            print " total physical memory: %s GB" % totalmem_prettyGB
+        
+        return totalmem_prettyGB
+
 
     ###########################################################
     def cleanup(self):
@@ -408,7 +427,8 @@ class maint:
     ###########################################################
     def get_readycnt(self):
         
-        sql = "select count(*) from (select pg_ls_dir from pg_ls_dir('%s') where pg_ls_dir ~ E'^[0-9A-F]{24}.ready$') as foo" % self.datadir
+        xlogdir = "%s/pg_xlog/archive_status" % self.datadir
+        sql = "select count(*) from (select pg_ls_dir from pg_ls_dir('%s') where pg_ls_dir ~ E'^[0-9A-F]{24}.ready$') as foo" % xlogdir
        
         # do not provide host name and/or port if not provided
         cmd = "psql %s -t -c \"%s\" " % (self.connstring, sql)
@@ -526,6 +546,32 @@ class maint:
             return maint_globals.SUCCESS, "Current load (%.2f%%) < Threshold load (%d%%)" % (load, self.load_threshold)
 
     ###########################################################
+    def get_slaves(self):
+    
+        sql = "select client_addr from pg_stat_replication where state = 'streaming' order by 1"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get table/index bloat count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        if len(results) == 0:
+            if self.html_format:
+                self.appendreport("<H3>No slaves detected.</H3>")
+            print "No slaves detected."
+        else:
+            print "rc=%d  slave results = %s" % (rc, results)
+            self.slaves = results.split('\n')
+            slavecnt = len(self.slaves)
+            if self.verbose:
+                print "slave count = %d  slaves = %s" % (slavecnt, self.slaves)
+            
+        return maint_globals.SUCCESS, ""        
+
+
+
+    ###########################################################
     def initreport(self):
 
         # get the host name
@@ -587,6 +633,10 @@ class maint:
             if rc <> maint_globals.SUCCESS:
                 return rc, results
 
+        rc, results = self.get_slaves()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results        
+
         # get pg memory settings
         rc, results = self.do_report_pgmemory()
         if rc <> maint_globals.SUCCESS:
@@ -647,8 +697,6 @@ class maint:
     ###########################################################
     def do_report_pgmemory(self):
 
-        totalmemGB = self.totalmem / (1024*1024*1024)
-        
         # shared_buffers:        
         # primitive logic: make shared buffers minimum 4GB or maximum 12GB or 25% of total memory
         # newer versions of PG seem to be more efficient with higher values, so logic is:
@@ -662,7 +710,7 @@ class maint:
         else:
            MAXGB = 12
         MINGB = 2
-        percent25GB = totalmemGB * 0.25
+        percent25GB = self.totalmemGB * 0.25
         shared_buffersGB = self.shared_buffers / 1024
         
         if percent25GB > MAXGB:
@@ -672,7 +720,7 @@ class maint:
         else:
             recommended_shared_buffers = percent25GB
         if self.verbose:
-            print "shared_buffers = %d percent25GB=%d  recommended=%d  totalmemGB=%d" % (self.shared_buffers, percent25GB, recommended_shared_buffers, totalmemGB)
+            print "shared_buffers = %d percent25GB=%d  recommended=%d  totalmemGB=%d" % (self.shared_buffers, percent25GB, recommended_shared_buffers, self.totalmemGB)
         
         # maintenance_work_mem
         # current pg versions dont perform better with high values, since there is a hard-coded limit of the this memory that will be used,
@@ -680,17 +728,17 @@ class maint:
         # MIN = 0.128GB, MAX 8 GB
         MIN = 0.128
         MAX = 8
-        if totalmemGB < 4:
+        if self.totalmemGB < 4:
             recommended_maintenance_work_mem = MIN
-        elif totalmemGB < 8:
+        elif self.totalmemGB < 8:
             recommended_maintenance_work_mem = 0.256            
-        elif totalmemGB < 16:
+        elif self.totalmemGB < 16:
             recommended_maintenance_work_mem = 0.512
-        elif totalmemGB < 32:
+        elif self.totalmemGB < 32:
             recommended_maintenance_work_mem = 1            
-        elif totalmemGB < 64:
+        elif self.totalmemGB < 64:
             recommended_maintenance_work_mem = 2                        
-        elif totalmemGB < 96:
+        elif self.totalmemGB < 96:
             recommended_maintenance_work_mem = 4
         else:
             recommended_maintenance_work_mem = MAX
@@ -698,37 +746,37 @@ class maint:
         # work_mem
         # need knowledge of SQL workload to do this effectivly, so for now, consider max connections and total memory
         if self.max_connections < 200:
-            if totalmemGB < 4:
+            if self.totalmemGB < 4:
                 recommended_work_mem = 0.016
-            elif totalmemGB < 8:
+            elif self.totalmemGB < 8:
                 recommended_work_mem = 0.032            
-            elif totalmemGB < 16:
+            elif self.totalmemGB < 16:
                 recommended_work_mem = 0.064
-            elif totalmemGB < 32:
+            elif self.totalmemGB < 32:
                 recommended_work_mem = 0.128        
-            elif totalmemGB < 64:
+            elif self.totalmemGB < 64:
                 recommended_work_mem = 0.256                        
             else:
                 recommended_work_mem = 0.512
         else:
-            if totalmemGB < 8:
+            if self.totalmemGB < 8:
                 recommended_work_mem = 0.016            
-            elif totalmemGB < 16:
+            elif self.totalmemGB < 16:
                 recommended_work_mem = 0.032
-            elif totalmemGB < 32:
+            elif self.totalmemGB < 32:
                 recommended_work_mem = 0.064        
-            elif totalmemGB < 64:
+            elif self.totalmemGB < 64:
                 recommended_work_mem = 0.128                        
             else:
                 recommended_work_mem = 0.256
         
         # effective_cache_size: settings shows it in 8kb chunks
         # set it to 75% of memory
-        recommended_effective_cache_size = .75 * totalmemGB
+        recommended_effective_cache_size = .75 * self.totalmemGB
 
-        print "Current and recommended PG Memory configuration settings. Total Memory = %s GB" % totalmemGB        
+        print "Current and recommended PG Memory configuration settings. Total Memory = %s GB" % self.totalmemGB        
         print "*** Consider changing these values if they differ significantly ***"        
-        totalf = "PG Memory Values are primarily based on total physical memory available: %04d GB" % (totalmemGB)
+        totalf = "PG Memory Values are primarily based on total physical memory available: %04d GB" % (self.totalmemGB)
         print totalf
         totalf = "<H4>" + totalf + "</H4>"
         if self.html_format:
@@ -904,7 +952,7 @@ class maint:
         version = Decimal(results)
      
         # first get count, then optionally retrieve the data
-        sql="SELECT count(*) FROM pg_stat_user_indexes ui JOIN pg_index i ON ui.indexrelid = i.indexrelid WHERE NOT indisunique AND idx_scan < 20 AND pg_relation_size(relid) > 1024 * 1024 * 100"    
+        sql="SELECT count(*) FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192"    
         cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
         rc, results = self.executecmd(cmd, False)
         if rc <> maint_globals.SUCCESS:
@@ -918,8 +966,18 @@ class maint:
             print "No unused index candidates were found."
             return maint_globals.SUCCESS, ""
 
+        # See if this cluster has dependent slaves and if so give information warning
+        slavecnt = len(self.slaves)
+        if slavecnt > 0:
+            msg = "%d slave(s) are dependent on this cluster.  Make sure these unused indexes are also unused on the slave(s) before considering them as index drop candidates." % slavecnt
+            if self.html_format:
+                msg = "<H4><p style=\"color:red;\">" + msg + "</p><H4>"
+                self.appendreport(msg)                
+            print msg
+
         # Criteria is indexes that are used less than 20 times and whose table size is > 100MB
-        sql="SELECT schemaname || '.' || relname AS table, indexrelname AS index, pg_size_pretty(pg_relation_size(relid)) as table_size, pg_size_pretty(pg_relation_size(i.indexrelid)) AS index_size, idx_scan as index_scans FROM pg_stat_user_indexes ui JOIN pg_index i ON ui.indexrelid = i.indexrelid WHERE NOT indisunique AND idx_scan < 20 AND pg_relation_size(relid) > 1024 * 1024 * 100 ORDER BY pg_relation_size(i.indexrelid) / nullif(idx_scan, 0) DESC NULLS FIRST, pg_relation_size(i.indexrelid) DESC"
+        sql="SELECT relname as table, schemaname||'.'||indexrelname AS fqindexname, pg_size_pretty(pg_relation_size(indexrelid)) as total_size, pg_relation_size(indexrelid) as raw_size, idx_scan as index_scans FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192 ORDER BY 4 DESC"
+
         if self.html_format:        
             cmd = "psql %s --html -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)                        
         else:
@@ -932,8 +990,8 @@ class maint:
             return rc, errors     
 
         if self.html_format:
-            self.appendreport("<H4>Unused indexes are identified where there are less than 20 index scans and the size of the table is > 100 MB.</H4>\n")        
-        print "Unused indexes are identified where there are less than 20 index scans and thee size of the table is > 100 MB."
+            self.appendreport("<H4>Unused indexes are identified where there are no index scans and the size of the index is > 8 KB.</H4>\n")        
+        print "Unused indexes are identified where there are no index scans and the size of the index  is > 8 KB."
 
         f = open(self.tempfile, "r")    
         lineno = 0
@@ -976,9 +1034,11 @@ class maint:
         
         if readycnt > 1000:
             if self.html_format:
-                msg = "<H3>Archiving is behind more than 1000 WAL files. Current count - %d</H3>" % readycnt
+                msg = "Archiving is behind more than 1000 WAL files. Current count: %d" % readycnt
+                msg = "<H4><p style=\"color:red;\">" + msg + "</p><H4>"            
                 self.appendreport(msg)                        
-            print "Archiving is behind more than 1000 WAL files. Current count - %d" % readycnt
+            print "Archiving is behind more than 1000 WAL files. Current count: %d" % readycnt
+            
         elif readycnt == 0:
             if self.archive_mode == 'on':
                 if self.html_format:
