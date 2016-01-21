@@ -61,7 +61,7 @@ For vacuum freeze:
 
 ## Report logic
 1. Get database conflicts, deadlocks, and temp_files.
-2. Unused indexes are identified where there are less than 20 index scans and thee size of the table is > 100 MB.
+2. Unused indexes are identified where there are no index scans and the size of the index > 8KB.
 3. Bloated tables/indexes are identified where at least 20% of the table/index is bloated or the wasted bytes is > 10 GB.
 4. See if archiving is getting behind by more than 1000 WAL files.
 5. Contrast PG memory configuration to recommended ones
