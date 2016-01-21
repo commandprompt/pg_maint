@@ -48,7 +48,8 @@
 #
 # Requirements:
 #   1. psql client 
-#   2. psutil (apt-get install python-psutil or yum install python-psutil). For windows: https://pypi.python.org/pypi?:action=display&name=psutil#downloads
+#   2. psutil for windows only https://pypi.python.org/pypi?:action=display&name=psutil#downloads
+#      (fyi for gettting it on linux but not required: apt-get install python-psutil or yum install python-psutil)
 #
 # Download: git clone https://github.com/commandprompt/pg_maint.git pg_maint
 #
@@ -102,14 +103,17 @@
 #       [db01]
 #       database: mydb
 #       action: vacuum_freeze
-#    3. Consider removing need to install psutils, since we only use it one place -->virtual_memory()
 #
 # History:
 # who did it            Date            did what
 # ==========            =========       ==============================
 # Michael Vitale        01/12/2016      Original coding using python 2.7.x on windows 8.1 and ubuntu 14.04 (pg 9.4)
 # Michael Vitale        01/13/2016      Finished porting code from bash script, pg_refreshstats.sh
-# Michael Vitale        01/14/2016      First crach at incorporated logic for report action.
+# Michael Vitale        01/14/2016      First crack at incorporated logic for report action.
+# Michael Vitale        01/17/2016      Implemented report output in html
+# Michael Vitale        01/18/2016      Fixed a bunch of bugs with html reporting
+# Michael Vitale        01/20/2016      Removed linux dependency on psutils module. 
+#                                       Enhanced unused indexes report to query slaves if available
 ################################################################################################################
 import string, sys, os, time, datetime, exceptions
 from decimal import *
@@ -166,6 +170,8 @@ if rc <> maint_globals.SUCCESS:
 # returns value like 9.4
 rc, results = pg.get_pgversion()
 # print "pg version: %.1f" % Decimal(results)
+
+print "%s  version: %.1f  %s\n\n" % (maint_globals.PROGNAME, maint_globals.VERSION, maint_globals.ADATE)
 
 rc, results = pg.check_load()
 if rc <> maint_globals.SUCCESS:
