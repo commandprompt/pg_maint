@@ -2,6 +2,9 @@
 This python program performs PostgreSQL maintenance tasks and provides reporting capabilities.  This program is compatible on linux and windows.  You can get it here:
 `git clone https://github.com/commandprompt/pg_maint.git pg_maint`
 
+You can see a sample report here:
+`https://rawgit.com/commandprompt/pg_maint/master/SampleReport.html`
+
 (c) 2016, Command Prompt, Inc.
 
 Bugs can be reported @ https://public.commandprompt.com/projects/pgmaint
