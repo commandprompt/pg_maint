@@ -76,11 +76,16 @@ class maint:
         self.dir_delim         = ''
         self.totalmemGB        = -1
         self.pgbindir          = ''
+        self.pgversion         = 0.0
         self.html_format       = False
         self.programdir        = ''
         self.imageURL          = "https://cloud.githubusercontent.com/assets/339156/12404356/c5c9f374-be08-11e5-8cfb-2ab6df0eb4b0.jpg"
         self.slaves            = []
-
+        self.bloatedtables     = False
+        self.unusedindexes     = False
+        self.freezecandidates  = False
+        self.analyzecandidates = False
+       
         # db config stuff
         self.archive_mode      = ''
         self.max_connections   = -1
@@ -172,6 +177,11 @@ class maint:
         if rc <> maint_globals.SUCCESS:
             errors = "rc=%d results=%s" % (rc,results)
 	    return rc, errors                  
+
+        rc, results = self.get_pgversion()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results        
+        self.pgversion = Decimal(results)
 
 	# Validate parameters
         rc, errors = self.validate_parms()	
@@ -556,16 +566,7 @@ class maint:
             aline = "%s" % (errors)         
             self.writeout(aline)
             return rc, errors     
-        if len(results) == 0:
-            if self.html_format:
-                self.appendreport("<H3>No slaves detected.</H3>")
-            print "No slaves detected."
-        else:
-            print "rc=%d  slave results = %s" % (rc, results)
-            self.slaves = results.split('\n')
-            slavecnt = len(self.slaves)
-            if self.verbose:
-                print "slave count = %d  slaves = %s" % (slavecnt, self.slaves)
+        self.slaves = results.split('\n')
             
         return maint_globals.SUCCESS, ""        
 
@@ -593,6 +594,12 @@ class maint:
 	    "<HEAD>\n" + \
 	    "<TITLE>pg_maint Maintenance Report</TITLE>\n" + \
 	    "</HEAD>\n" + \
+	    "<style>" + \
+            ".table1 {font-size:16px; border:1px solid black; border-collapse:collapse; }" + \
+            ".table1 th { color:#000;    text-align:left; border:1px solid black; padding: 5px;}" + \
+            ".table1 td { color:#000099; text-align:left; border:1px solid black; padding: 5px;}" + \
+            "caption { text-align:left; caption-side: left; }" + \
+            "</style>" + \
 	    "<BODY BGCOLOR=\"FFFFFF\">\n" + \
 	    "<div id='container'>\n" + \
 	    "<img src='" + self.imageURL + "' style='float: left;'/>\n" + \
@@ -637,22 +644,14 @@ class maint:
         if rc <> maint_globals.SUCCESS:
             return rc, results        
 
+        # do health checks
+        rc, results = self.do_report_healthchecks()
+        if rc <> maint_globals.SUCCESS:
+            return rc, results
+        print ""
+
         # get pg memory settings
         rc, results = self.do_report_pgmemory()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
-
-        # get archiving status
-        rc, results = self.do_report_archivingstatus()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
-
-        # get database conflicts if applicable
-        rc, results = self.do_report_conflicts()
         if rc <> maint_globals.SUCCESS:
             return rc, results
         print ""
@@ -661,28 +660,18 @@ class maint:
         rc, results = self.do_report_bloated()
         if rc <> maint_globals.SUCCESS:
             return rc, results
-
         print ""
         
         # get unused indexes
         rc, results = self.do_report_unusedindexes()
         if rc <> maint_globals.SUCCESS:
             return rc, results
-
         print ""
         
-        # get count of orphaned large objects
-        rc, results = self.do_report_orphanedlargeobjects()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results
-
-        print ""
-       
-        # get count of orphaned large objects
+        # See what tables need to be analyzed, vacuumed, etc
         rc, results = self.do_report_tablemaintenance()
         if rc <> maint_globals.SUCCESS:
             return rc, results
-
         print ""
 
         if self.html_format:
@@ -701,11 +690,7 @@ class maint:
         # primitive logic: make shared buffers minimum 4GB or maximum 12GB or 25% of total memory
         # newer versions of PG seem to be more efficient with higher values, so logic is:
         # if pg 9.3 or lower max is 8GB, if pg 9.4 or higher 12 GB max
-        rc, results = self.get_pgversion()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results        
-        version = Decimal(results)
-        if version < 9.13:
+        if self.pgversion < 9.13:
            MAXGB = 8
         else:
            MAXGB = 12
@@ -808,8 +793,8 @@ class maint:
             html +="<tr valign=\"top\">\n" + "<td align=\"left\">shared_buffers</td>\n" + "<th align=\"center\">" + str(shared_buffers_f) + "</th>\n" + "<th align=\"center\">" + str(recommended_shared_buffers_f) + "</th>\n" + "</tr>\n" 
             html +="<tr valign=\"top\">\n" + "<td align=\"left\">maintenance_work_mem</td>\n" + "<th align=\"center\">" + str(maintenance_work_mem_f) + "</th>\n" + "<th align=\"center\">" + str(recommended_maintenance_work_mem_f) + "</th>\n" + "</tr>\n" 
             html +="<tr valign=\"top\">\n" + "<td align=\"left\">work_mem</td>\n" + "<th align=\"center\">" + str(work_mem_f) + "</th>\n" + "<th align=\"center\">" + str(recommended_work_mem_f) + "</th>\n" + "</tr>\n" + "</table>" 
-
             self.appendreport(html)
+            self.appendreport("<p><br></p>")            
             
 
         return maint_globals.SUCCESS, ""
@@ -820,19 +805,7 @@ class maint:
          SELECT schemaname, tablename, ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) AS tbloat,  CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END AS wastedbytes,  iname,   ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) AS ibloat, CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedibytes FROM (SELECT  schemaname, tablename, cc.reltuples, cc.relpages, bs,  CEIL((cc.reltuples*((datahdr+ma- (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,  COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages, COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta FROM ( SELECT   ma,bs,schemaname,tablename,   (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,   (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2 FROM ( SELECT schemaname, tablename, hdr, ma, bs, SUM((1-null_frac)*avg_width) AS datawidth, MAX(null_frac) AS maxfracsum,  hdr+( SELECT 1+COUNT(*)/8 FROM pg_stats s2 WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename ) AS nullhdr FROM pg_stats s, ( SELECT (SELECT current_setting('block_size')::NUMERIC) AS bs, CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr, CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma FROM (SELECT version() AS v) AS foo ) AS constants  GROUP BY 1,2,3,4,5 ) AS foo) AS rs  JOIN pg_class cc ON cc.relname = rs.tablename  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' LEFT JOIN pg_index i ON indrelid = cc.oid LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid ) AS sml where ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) > 20 OR ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) > 20 or CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END > 10737418240 OR CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END > 10737418240 ORDER BY wastedbytes DESC;
         '''
 
-        # first get count, then optionally retrieve the data
-        sql = "SELECT count(*) FROM (SELECT  schemaname, tablename, cc.reltuples, cc.relpages, bs,  CEIL((cc.reltuples*((datahdr+ma- (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,  COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages, COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta FROM ( SELECT   ma,bs,schemaname,tablename,   (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,   (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2 FROM ( SELECT schemaname, tablename, hdr, ma, bs, SUM((1-null_frac)*avg_width) AS datawidth, MAX(null_frac) AS maxfracsum,  hdr+( SELECT 1+COUNT(*)/8 FROM pg_stats s2 WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename ) AS nullhdr FROM pg_stats s, ( SELECT (SELECT current_setting('block_size')::NUMERIC) AS bs, CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr, CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma FROM (SELECT version() AS v) AS foo ) AS constants  GROUP BY 1,2,3,4,5 ) AS foo) AS rs  JOIN pg_class cc ON cc.relname = rs.tablename  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' LEFT JOIN pg_index i ON indrelid = cc.oid LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid ) AS sml where ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) > 20 OR ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) > 20 or CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END > 10737418240 OR CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END > 10737418240"
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get table/index bloat count: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        if int(results) == 0:
-            if self.html_format:
-                self.appendreport("<H3>No bloated tables were found.</H3>")
-            print "No bloated tables were found."
+        if self.bloatedtables == False:
             return maint_globals.SUCCESS, ""
 
         sql = "SELECT schemaname, tablename, ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) AS tbloat,  CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END AS wastedbytes,  iname,   ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) AS ibloat, CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END AS wastedibytes FROM (SELECT  schemaname, tablename, cc.reltuples, cc.relpages, bs,  CEIL((cc.reltuples*((datahdr+ma- (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,  COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages, COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta FROM ( SELECT   ma,bs,schemaname,tablename,   (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,   (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2 FROM ( SELECT schemaname, tablename, hdr, ma, bs, SUM((1-null_frac)*avg_width) AS datawidth, MAX(null_frac) AS maxfracsum,  hdr+( SELECT 1+COUNT(*)/8 FROM pg_stats s2 WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename ) AS nullhdr FROM pg_stats s, ( SELECT (SELECT current_setting('block_size')::NUMERIC) AS bs, CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr, CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma FROM (SELECT version() AS v) AS foo ) AS constants  GROUP BY 1,2,3,4,5 ) AS foo) AS rs  JOIN pg_class cc ON cc.relname = rs.tablename  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' LEFT JOIN pg_index i ON indrelid = cc.oid LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid ) AS sml where ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) > 20 OR ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) > 20 or CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END > 10737418240 OR CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END > 10737418240 ORDER BY wastedbytes DESC"
@@ -871,100 +844,19 @@ class maint:
                 self.appendreport(msg)
             print "%s\n" % (aline)
 
+        if self.html_format:
+            self.appendreport("<p><br></p>")
         f.close() 
     
         return maint_globals.SUCCESS, ""
-
-    ###########################################################
-    def do_report_conflicts(self):
-    
-        # NOTE: only applies to PG versions greater or equal to 9.1.  9.2 has additional fields of interest: deadlocks and temp_files
-        rc, results = self.get_pgversion()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results        
-        version = Decimal(results)
-        if version < 9.1:
-            print "No database conflicts found."
-            return maint_globals.SUCCESS, ""        
-    
-        if version == 9.1:
-            sql="select datname, conflicts from pg_stat_database"
-        else:
-            sql="select datname, conflicts, deadlocks, temp_files from pg_stat_database"        
-
-        cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)        
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get database stats: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-
-        f = open(self.tempfile, "r")    
-        lineno = 0
-        count  = 0
-        for line in f:
-            lineno = lineno + 1
-            if self.verbose:
-                print "%d line=%s" % (lineno,line)
-            aline = line.strip()
-            if len(aline) < 1:
-                continue
-
-            deadlocks = -1
-            temp_files = -1
-            fields = aline.split('|')
-            if version == 9.1:
-                adatabase   = fields[0].strip()
-                conflicts   = int(fields[1].strip())
-            else:
-                adatabase   = fields[0].strip()
-                conflicts   = int(fields[1].strip())
-                deadlocks   = int(fields[2].strip())
-                temp_files  = int(fields[3].strip())                
-
-            if self.verbose:
-                print "db=%s  conflicts=%d  deadlocks=%d  temp_files=%d" % (adatabase, conflicts, deadlocks, temp_files)
-
-            if conflicts > 0 or deadlocks > 0 or temp_files > 0:
-                count = count + 1
-                if self.html_format:
-                    msg = "<H4>Database Conflicts found: db=%s  conflicts=%d  deadlocks=%d  temp_files=%d</H4>" % (adatabase, conflicts, deadlocks, temp_files)
-                    self.appendreport(msg)                
-                print "Database Conflicts found: db=%s  conflicts=%d  deadlocks=%d  temp_files=%d" % (adatabase, conflicts, deadlocks, temp_files)
-
-        f.close() 
-    
-        if count == 0:
-            if self.html_format:
-                self.appendreport("<H3>No database conflicts were found.</H3>")        
-            print "No database conflicts were found."
-    
-        return maint_globals.SUCCESS, ""    
         
     ###########################################################
     def do_report_unusedindexes(self):
     
         # NOTE: no version problems identified yet
-        rc, results = self.get_pgversion()
-        if rc <> maint_globals.SUCCESS:
-            return rc, results        
-        version = Decimal(results)
      
-        # first get count, then optionally retrieve the data
-        sql="SELECT count(*) FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192"    
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get unused indexes count: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        if int(results) == 0:
-            if self.html_format:
-                self.appendreport("<H3>No unused index candidates were found.</H3>")        
-            print "No unused index candidates were found."
-            return maint_globals.SUCCESS, ""
+        if self.unusedindexes == False:
+            return maint_globals.SUCCESS, ""     
 
         # See if this cluster has dependent slaves and if so give information warning
         slavecnt = len(self.slaves)
@@ -1014,103 +906,15 @@ class maint:
                 print "%s" % aline
                 if self.html_format:
                     self.appendreport(aline)
+        if self.html_format:
+            self.appendreport("<p><br></p>")
         f.close() 
-        return maint_globals.SUCCESS, ""    
-        
-    ###########################################################
-    def do_report_archivingstatus(self):
-        
-        rc, results = self.get_readycnt()
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get archiving status: %d %s\n" % (rc, results)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-
-        readycnt = int(results)
-        
-        if self.verbose:
-            print "Ready Count = %d" % readycnt
-        
-        if readycnt > 1000:
-            if self.html_format:
-                msg = "Archiving is behind more than 1000 WAL files. Current count: %d" % readycnt
-                msg = "<H4><p style=\"color:red;\">" + msg + "</p><H4>"            
-                self.appendreport(msg)                        
-            print "Archiving is behind more than 1000 WAL files. Current count: %d" % readycnt
-            
-        elif readycnt == 0:
-            if self.archive_mode == 'on':
-                if self.html_format:
-                    msg = "<H3>Archiving is on and currently up-to-date.</H3>"
-                    self.appendreport(msg)        
-                print "Archiving is on and currently up-to-date."
-            else:
-                if self.html_format:
-                    msg = "<H3>Archiving is off and not applicable.</H3>"
-                    self.appendreport(msg)        
-                print "Archiving is off and not applicable."    
-        else:
-            if self.html_format:
-                msg = "<H3>Archiving is working and not too far behind. WALs waiting to be ardchived=%d</H3>" % readycnt
-                self.appendreport(msg)        
-            msg = "Archiving is working and not too far behind. WALs waiting to be ardchived=%d" % readycnt
-            print msg
-
-        return maint_globals.SUCCESS, ""            
-    
-    ###########################################################
-    def do_report_orphanedlargeobjects(self):
-
-        if self.dbuser == '':
-            user_clause = " "
-        else:
-            user_clause = " -U %s " % self.dbuser
-            
-        cmd = "%s/vacuumlo -n %s %s" % (self.pgbindir, user_clause, self.database)
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get orphaned large objects: %d %s\ncmd=%s\n" % (rc, results, cmd)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        
-        if self.verbose:
-            print "vacuumlo results: rc=%d  %s" % (rc,results)
-        
-        # expecting substring like this --> "Would remove 35 large objects from database "agmednet.core.image"."
-        numobjects = (results.split("Would remove"))[1].split("large objects")[0]
-
-        if int(numobjects) == 0:
-            if self.html_format:
-	        msg = "<H3>No orphaned large objects were found.</H3>"
-                self.appendreport(msg)        
-            print "No orphaned large objects were found."
-        else:
-            if self.html_format:
-	        msg = "<H3>%d orphaned large objects were found.  Consider running vacuumlo to remove them.</H3>" % int(numobjects)
-                self.appendreport(msg)                
-            print "%d orphaned large objects were found.  Consider running vacuumlo to remove them." % int(numobjects)
-            
         return maint_globals.SUCCESS, ""            
         
     ###########################################################
     def do_report_tablemaintenance(self):        
 
-        # first get count, then optionally retrieve the data
-        sql="WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select count(c.*) from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' and pg_table_size(c.oid) > 1073741824 and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 50"
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get vacuum freeze candidate count: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        if int(results) == 0:
-            if self.html_format:
-                self.appendreport("<H3>No vacuum freeze candidates were found.</H3>")        
-            print "No vacuum freeze candidates were found."
-        else:
+        if self.freezecandidates == True:
             sql = "WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select s.setting, n.nspname as schema, c.relname as table, age(c.relfrozenxid) as xid_age, pg_size_pretty(pg_table_size(c.oid)) as table_size, round((age(c.relfrozenxid)::float / s.setting::float) * 100) as pct from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' and pg_table_size(c.oid) > 1073741824 and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 50 ORDER BY age(c.relfrozenxid)"
             if self.html_format:        
                 cmd = "psql %s --html -c \"%s\" > %s" % (self.connstring, sql, self.tempfile)                        
@@ -1150,26 +954,14 @@ class maint:
                     if self.html_format:
                          self.appendreport(aline)
                     print "%s" % aline
-    
             f.close() 
+            if self.html_format:
+                self.appendreport("<p><br></p>")            
 
         print ""
-        
-        # handle vacuum analyze candidates     
-        # first get count, then optionally retrieve the data
-        sql="select count(*) from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where c.relnamespace = n.oid and n.nspname = t.schemaname and t.tablename = c.relname and t.schemaname = u.schemaname and t.tablename = u.relname and n.nspname not in ('information_schema','pg_catalog') and (((c.reltuples > 0 and round((u.n_live_tup::float / c.reltuples::float) * 100) < 50)) OR ((last_vacuum is null and last_autovacuum is null and last_analyze is null and last_autoanalyze is null ) or (now()::date  - last_vacuum::date > 60 AND now()::date - last_autovacuum::date > 60 AND now()::date  - last_analyze::date > 60 AND now()::date  - last_autoanalyze::date > 60)))"
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get vacuum analyze candidate count: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        if int(results) == 0:
-            if self.html_format:
-                self.appendreport("<H3>No vacuum analyze candidates were found.</H3>")        
-            print "No vacuum analyze candidates were found."
-            return maint_globals.SUCCESS, ""
+
+        if self.analyzecandidates == False:
+            return maint_globals.SUCCESS, ""                    
         
         sql = "select n.nspname || '.' || c.relname as table, last_analyze, last_autoanalyze, last_vacuum, last_autovacuum, u.n_live_tup::bigint, c.reltuples::bigint, round((u.n_live_tup::float / CASE WHEN c.reltuples = 0 THEN 1.0 ELSE c.reltuples::float  END) * 100) as pct from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where c.relnamespace = n.oid and n.nspname = t.schemaname and t.tablename = c.relname and t.schemaname = u.schemaname and t.tablename = u.relname and n.nspname not in ('information_schema','pg_catalog') and (((c.reltuples > 0 and round((u.n_live_tup::float / c.reltuples::float) * 100) < 50)) OR ((last_vacuum is null and last_autovacuum is null and last_analyze is null and last_autoanalyze is null ) or (now()::date  - last_vacuum::date > 60 AND now()::date - last_autovacuum::date > 60 AND now()::date  - last_analyze::date > 60 AND now()::date  - last_autoanalyze::date > 60))) order by n.nspname, c.relname"
 
@@ -1210,8 +1002,305 @@ class maint:
                     self.appendreport(aline)                
                 print "%s" % aline
 
+        if self.html_format:
+            self.appendreport("<p><br></p>")
         f.close() 
     
+        return maint_globals.SUCCESS, ""            
+
+    #############################################################################################
+    def do_report_healthchecks(self):
+
+        # setup special table format
+        html = "<table class=\"table1\" style=\"width:100%\"> <caption><h3>Health Checks</h3></caption>" + \
+               "<tr> <th>Status</th> <th>Category</th> <th>Analysis</th> </tr>" 
+        self.appendreport(html)    
+ 
+        slavecnt = len(self.slaves)
+        # still need to check for empty string as first slot
+        if slavecnt == 1 and  self.slaves[0].strip() == '':
+            slavecnt = 0
+            
+        if self.verbose:
+            print "slavecnt=%d  slaves=%s" % (slavecnt, self.slaves)        
+        msg = "%d slave(s) were detected." % slavecnt
+        print msg
+        if self.html_format:
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Number of Slaves</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
+            self.appendreport(html)            
+
+        ######################################################
+        # get connection counts and compare to max connections
+        ######################################################
+        sql = "select count(*) from pg_stat_activity"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+            errors = "Unable to get count of current connections: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        conns = int(results)
+        result = float(conns) / self.max_connections
+        percentconns = int(math.floor(result * 100))    
+        if self.verbose:
+            print "Max connections = %d   Current connections = %d   PctConnections = %d" % (self.max_connections, conns, percentconns)
+
+        if percentconns > 80:
+            # 80 percent is the hard coded threshold
+            msg = "Current connections (%d) are greater than 80% of max connections (%d) " % (conns, self.max_connections)
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Connections</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"
+        else:
+            msg = "Current connections (%d) are not too close to max connections (%d) " % (conns, self.max_connections)
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Connections</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+        if self.html_format:
+            self.appendreport(html)            
+        print msg
+
+        
+        #######################################################################
+        # get existing "idle in transaction" connections longer than 10 minutes
+        #######################################################################        
+        # select substring(query,1,50), round(EXTRACT(EPOCH FROM (now() - query_start))), now(), query_start, state  from pg_stat_activity;
+        sql = "select count(*) from pg_stat_activity where state = \'idle in transaction\' and round(EXTRACT(EPOCH FROM (now() - query_start))) > 10"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+            errors = "Unable to get count of idle in transaction connections: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        idle_in_transaction_cnt = int(results)
+            
+        if idle_in_transaction_cnt == 0:
+            msg = "No idle in transactions longer than 10 minutes were detected."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Idle In Transaction</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+        else:
+            msg = "%d idle in transactions longer than 15 minutes were detected." % idle_in_transaction_cnt
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Idle In Transaction</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
+        if self.html_format:            
+            self.appendreport(html)
+        print msg
+
+        #################################
+        # get archiving info if available
+        #################################
+        rc, results = self.get_readycnt()
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get archiving status: %d %s\n" % (rc, results)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        readycnt = int(results)
+        
+        if self.verbose:
+            print "Ready Count = %d" % readycnt
+        
+        if readycnt > 1000:
+            if self.html_format:
+                msg = "Archiving is behind more than 1000 WAL files. Current count: %d" % readycnt
+                html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Archiving Status</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"
+            
+        elif readycnt == 0:
+            if self.archive_mode == 'on':
+                if self.html_format:
+                    msg = "Archiving is on and currently up-to-date."
+                    html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Archiving Status</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+            else:
+                if self.html_format:
+                    msg = "Archiving is off so nothing to analyze."
+                    html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Archiving Status</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+        else:
+            if self.html_format:
+                msg = "Archiving is working and not too far behind. WALs waiting to be archived=%d" % readycnt
+                html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Archiving Status</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+        
+        print msg
+        if self.html_format:
+            self.appendreport(html)
+
+        ########################################################################################################################################### 
+        # database conflicts: only applies to PG versions greater or equal to 9.1.  9.2 has additional fields of interest: deadlocks and temp_files
+        ###########################################################################################################################################
+        if self.pgversion < 9.1:
+            print "No database conflicts found."
+            return maint_globals.SUCCESS, ""        
+    
+        if self.pgversion == 9.1:
+            sql="select datname, conflicts from pg_stat_database where datname = '%s'" % self.database
+        else:
+            sql="select datname, conflicts, deadlocks, temp_files from pg_stat_database where datname = '%s'" % self.database
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+	rc, results = self.executecmd(cmd, False)
+	if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get database conflicts: %d %s\nsql=%s\n" % (rc, results, sql)
+	    aline = "%s" % (errors)         
+	    self.writeout(aline)
+	    return rc, errors     
+	# print "conflict results=%s" % results
+	cols = results.split('|')
+	database   = cols[0].strip()
+	conflicts  = int(cols[1].strip())
+	deadlocks  = -1
+	temp_files = -1
+	if len(cols) > 2:
+	    deadlocks  = int(cols[2].strip())
+	    temp_files = int(cols[3].strip())
+
+        if self.verbose:
+            print 
+                
+        if conflicts > 0 or deadlocks > 0 or temp_files > 0:
+            msg = "Database conflicts found: database=%s  conflicts=%d  deadlocks=%d  temp_files=%d" % (database, conflicts, deadlocks, temp_files)
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Database Conflicts</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"
+        else:
+            msg = "No database conflicts found."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Database Conflicts</font></td><td width=\"75%\"><font color=\"blue\">None Found</font></td></tr>"            
+
+        print msg
+        if self.html_format:
+            self.appendreport(html)
+
+        ########################
+        # orphaned large objects	    
+        ########################
+        if self.dbuser == '':
+            user_clause = " "
+        else:
+            user_clause = " -U %s " % self.dbuser
+            
+        cmd = "%s/vacuumlo -n %s %s" % (self.pgbindir, user_clause, self.database)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get orphaned large objects: %d %s\ncmd=%s\n" % (rc, results, cmd)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        
+        # expecting substring like this --> "Would remove 35 large objects from database "agmednet.core.image"."
+        numobjects = (results.split("Would remove"))[1].split("large objects")[0]
+
+        if int(numobjects) == 0:
+            msg = "No orphaned large objects were found."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Orphaned Large Objects</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
+        else:
+            msg = "%d orphaned large objects were found.  Consider running vacuumlo to remove them." % int(numobjects)        
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Orphaned Large Objects</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
+
+        print msg            
+        if self.html_format:
+            self.appendreport(html)
+
+        ##################################
+        # Check for bloated tables/indexes
+        ##################################
+        sql = "SELECT count(*) FROM (SELECT  schemaname, tablename, cc.reltuples, cc.relpages, bs,  CEIL((cc.reltuples*((datahdr+ma- (CASE WHEN datahdr%ma=0 THEN ma ELSE datahdr%ma END))+nullhdr2+4))/(bs-20::FLOAT)) AS otta,  COALESCE(c2.relname,'?') AS iname, COALESCE(c2.reltuples,0) AS ituples, COALESCE(c2.relpages,0) AS ipages, COALESCE(CEIL((c2.reltuples*(datahdr-12))/(bs-20::FLOAT)),0) AS iotta FROM ( SELECT   ma,bs,schemaname,tablename,   (datawidth+(hdr+ma-(CASE WHEN hdr%ma=0 THEN ma ELSE hdr%ma END)))::NUMERIC AS datahdr,   (maxfracsum*(nullhdr+ma-(CASE WHEN nullhdr%ma=0 THEN ma ELSE nullhdr%ma END))) AS nullhdr2 FROM ( SELECT schemaname, tablename, hdr, ma, bs, SUM((1-null_frac)*avg_width) AS datawidth, MAX(null_frac) AS maxfracsum,  hdr+( SELECT 1+COUNT(*)/8 FROM pg_stats s2 WHERE null_frac<>0 AND s2.schemaname = s.schemaname AND s2.tablename = s.tablename ) AS nullhdr FROM pg_stats s, ( SELECT (SELECT current_setting('block_size')::NUMERIC) AS bs, CASE WHEN SUBSTRING(v,12,3) IN ('8.0','8.1','8.2') THEN 27 ELSE 23 END AS hdr, CASE WHEN v ~ 'mingw32' THEN 8 ELSE 4 END AS ma FROM (SELECT version() AS v) AS foo ) AS constants  GROUP BY 1,2,3,4,5 ) AS foo) AS rs  JOIN pg_class cc ON cc.relname = rs.tablename  JOIN pg_namespace nn ON cc.relnamespace = nn.oid AND nn.nspname = rs.schemaname AND nn.nspname <> 'information_schema' LEFT JOIN pg_index i ON indrelid = cc.oid LEFT JOIN pg_class c2 ON c2.oid = i.indexrelid ) AS sml where ROUND((CASE WHEN otta=0 THEN 0.0 ELSE sml.relpages::FLOAT/otta END)::NUMERIC,1) > 20 OR ROUND((CASE WHEN iotta=0 OR ipages=0 THEN 0.0 ELSE ipages::FLOAT/iotta END)::NUMERIC,1) > 20 or CASE WHEN relpages < otta THEN 0 ELSE bs*(sml.relpages-otta)::BIGINT END > 10737418240 OR CASE WHEN ipages < iotta THEN 0 ELSE bs*(ipages-iotta) END > 10737418240"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get table/index bloat count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        if int(results) == 0:
+            self.bloatedtables = False
+            msg = "No bloated tables/indexes were found."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Bloated Tables and/or Indexes</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
+        else:
+            self.bloatedtables = True
+            msg = "%d bloated tables/indexes were found." % int(results)        
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Bloated Tables and/or Indexes</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
+
+        print msg            
+        if self.html_format:
+            self.appendreport(html)
+        
+
+        ##########################
+        # Check for unused indexes
+        ##########################
+        sql="SELECT count(*) FROM pg_stat_user_indexes JOIN pg_index USING(indexrelid) WHERE idx_scan = 0 AND idx_tup_read = 0 AND idx_tup_fetch = 0 AND NOT indisprimary AND NOT indisunique AND NOT indisexclusion AND indisvalid AND indisready AND pg_relation_size(indexrelid) > 8192"    
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get unused indexes count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        if int(results) == 0:
+            self.unusedindexes = False
+            msg = "No unused indexes were found."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Unused Indexes</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
+        else:
+            self.unusedindexes = True
+            msg = "%d unused indexes were found." % int(results)        
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Unused Indexes</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
+
+        print msg            
+        if self.html_format:
+            self.appendreport(html)
+
+        
+        ####################################
+        # Check for vacuum freeze candidates
+        ####################################
+        sql="WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select count(c.*) from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' and pg_table_size(c.oid) > 1073741824 and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 50"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get vacuum freeze candidate count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        if int(results) == 0:
+            self.freezecandidates = False
+            msg = "No vacuum freeze candidates were found."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Vacuum Freeze Candidates</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
+        else:
+            self.freezecandidates = True
+            msg = "%d vacuum freeze candidates were found." % int(results)        
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Vacuum Freeze Candidates</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
+
+        print msg            
+        if self.html_format:
+            self.appendreport(html)
+
+
+        ##############################
+        # Check for analyze candidates
+        ##############################
+        sql="select count(*) from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where c.relnamespace = n.oid and n.nspname = t.schemaname and t.tablename = c.relname and t.schemaname = u.schemaname and t.tablename = u.relname and n.nspname not in ('information_schema','pg_catalog') and (((c.reltuples > 0 and round((u.n_live_tup::float / c.reltuples::float) * 100) < 50)) OR ((last_vacuum is null and last_autovacuum is null and last_analyze is null and last_autoanalyze is null ) or (now()::date  - last_vacuum::date > 60 AND now()::date - last_autovacuum::date > 60 AND now()::date  - last_analyze::date > 60 AND now()::date  - last_autoanalyze::date > 60)))"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get vacuum analyze candidate count: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+
+        if int(results) == 0:
+            self.analyzecandidates = False
+            msg = "No vacuum analyze candidates were found."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Vacuum Analyze Candidates</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
+        else:
+            self.analyzecandidates = True
+            msg = "%d vacuum analyze candidate(s) were found." % int(results)        
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Vacuum Analyze Candidates</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
+
+        print msg            
+        if self.html_format:
+            self.appendreport(html)
+
+
+        # finish special table format
+        self.appendreport("</table>")
+        self.appendreport("<p><br></p>")                                        
+
+
         return maint_globals.SUCCESS, ""            
         
     ###########################################################
