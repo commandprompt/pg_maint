@@ -3,7 +3,7 @@ This python program performs PostgreSQL maintenance tasks and provides reporting
 `git clone https://github.com/commandprompt/pg_maint.git pg_maint`
 
 You can see a sample report here:
-`https://rawgit.com/commandprompt/pg_maint/master/SampleReport.html`
+@ https://rawgit.com/commandprompt/pg_maint/master/SampleReport.html
 
 (c) 2016, Command Prompt, Inc.
 
