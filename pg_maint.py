@@ -180,12 +180,12 @@ if rc <> maint_globals.SUCCESS:
 
 rc, results = pg.do_vac_and_analyze()
 if rc < maint_globals.SUCCESS:
-    print results
+    # print results
     sys.exit(1)
 
 rc, results = pg.do_report()
 if rc < maint_globals.SUCCESS:
-    print results
+    # print results
     sys.exit(1)
 
 pg.cleanup()
