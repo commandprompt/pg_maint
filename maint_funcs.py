@@ -397,7 +397,7 @@ class maint:
         if self.verbose:
             print "rc=%d  values=***%s***  errors=***%s***" % (rc, values, err)        
         
-        if rc == 2:
+        if rc == 1 or rc == 2:
             return maint_globals.ERROR2, err
         elif rc == 127:
             return maint_globals.ERROR2, err        
@@ -690,7 +690,7 @@ class maint:
         # primitive logic: make shared buffers minimum 4GB or maximum 12GB or 25% of total memory
         # newer versions of PG seem to be more efficient with higher values, so logic is:
         # if pg 9.3 or lower max is 8GB, if pg 9.4 or higher 12 GB max
-        if self.pgversion < 9.13:
+        if self.pgversion < 9.3:
            MAXGB = 8
         else:
            MAXGB = 12
@@ -761,7 +761,7 @@ class maint:
 
         print "Current and recommended PG Memory configuration settings. Total Memory = %s GB" % self.totalmemGB        
         print "*** Consider changing these values if they differ significantly ***"        
-        totalf = "PG Memory Values are primarily based on total physical memory available: %04d GB" % (self.totalmemGB)
+        totalf = "PG Memory Values are based on a dedicated PG Server and total physical memory available: %04d GB" % (self.totalmemGB)
         print totalf
         totalf = "<H4>" + totalf + "</H4>"
         if self.html_format:
@@ -1029,6 +1029,36 @@ class maint:
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Number of Slaves</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
             self.appendreport(html)            
 
+        ##################### 
+        # get cache hit ratio
+        #####################
+        # SELECT datname, blks_read, blks_hit, round((blks_hit::float/(blks_read+blks_hit+1)*100)::numeric, 2) as cachehitratio FROM pg_stat_database ORDER BY datname, cachehitratio
+        sql = "SELECT blks_read, blks_hit, round((blks_hit::float/(blks_read+blks_hit+1)*100)::numeric, 2) as cachehitratio FROM pg_stat_database where datname = '%s' ORDER BY datname, cachehitratio" % self.database
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+            errors = "Unable to get database cache hit ratio: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+	cols = results.split('|')
+	blks_read   = int(cols[0].strip())
+	blks_hit    = int(cols[1].strip())
+	cache_ratio = Decimal(cols[2].strip())
+        if cache_ratio < 70.0:
+            msg = "low cache hit ratio: %.2f (blocks hit vs blocks read)" % cache_ratio
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10004;</font></td><td width=\"20%\"><font color=\"red\">Cache Hit Ratio</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"
+        elif cache_ratio < 90.0:
+            msg = "Moderate cache hit ratio: %.2f (blocks hit vs blocks read)" % cache_ratio
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Cache Hit Ratio</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+        else:
+            msg = "High cache hit ratio: %.2f (blocks hit vs blocks read)" % cache_ratio
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Cache Hit Ratio</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+        if self.html_format:            
+            self.appendreport(html)
+        print msg
+
+
         ######################################################
         # get connection counts and compare to max connections
         ######################################################
@@ -1048,7 +1078,7 @@ class maint:
 
         if percentconns > 80:
             # 80 percent is the hard coded threshold
-            msg = "Current connections (%d) are greater than 80% of max connections (%d) " % (conns, self.max_connections)
+            msg = "Current connections (%d) are greater than 80%% of max connections (%d) " % (conns, self.max_connections)
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Connections</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"
         else:
             msg = "Current connections (%d) are not too close to max connections (%d) " % (conns, self.max_connections)
@@ -1061,8 +1091,14 @@ class maint:
         #######################################################################
         # get existing "idle in transaction" connections longer than 10 minutes
         #######################################################################        
-        # select substring(query,1,50), round(EXTRACT(EPOCH FROM (now() - query_start))), now(), query_start, state  from pg_stat_activity;
-        sql = "select count(*) from pg_stat_activity where state = \'idle in transaction\' and round(EXTRACT(EPOCH FROM (now() - query_start))) > 10"
+        # NOTE: 9.1 uses procpid, current_query, and no state column, but 9.2+ uses pid, query and state columns respectively.  Also idle is <IDLE> in current_query for 9.1 and less
+        #       <IDLE> in transaction for 9.1 but idle in transaction for state column in 9.2+        
+        if self.pgversion < 9.2:
+            # select substring(current_query,1,50), round(EXTRACT(EPOCH FROM (now() - query_start))), now(), query_start  from pg_stat_activity;
+            sql = "select count(*) from pg_stat_activity where current_query ilike \'<IDLE> in transaction%\' and round(EXTRACT(EPOCH FROM (now() - query_start))) > 10"
+        else:
+            # select substring(query,1,50), round(EXTRACT(EPOCH FROM (now() - query_start))), now(), query_start, state  from pg_stat_activity;
+            sql = "select count(*) from pg_stat_activity where state = \'idle in transaction\' and round(EXTRACT(EPOCH FROM (now() - query_start))) > 10"      
         cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
         rc, results = self.executecmd(cmd, False)
         if rc <> maint_globals.SUCCESS:
@@ -1073,14 +1109,75 @@ class maint:
         idle_in_transaction_cnt = int(results)
             
         if idle_in_transaction_cnt == 0:
-            msg = "No idle in transactions longer than 10 minutes were detected."
+            msg = "No \"idle in transaction\" longer than 10 minutes were detected."
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Idle In Transaction</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
         else:
-            msg = "%d idle in transactions longer than 15 minutes were detected." % idle_in_transaction_cnt
+            msg = "%d \"idle in transaction\" longer than 15 minutes were detected." % idle_in_transaction_cnt
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Idle In Transaction</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
         if self.html_format:            
             self.appendreport(html)
         print msg
+
+
+        ######################################
+        # Get long running queries > 5 minutes
+        ######################################
+        # NOTE: 9.1 uses procpid, current_query, and no state column, but 9.2+ uses pid, query and state columns respectively.  Also idle is <IDLE> in current_query for 9.1 and less
+        #       <IDLE> in transaction for 9.1 but idle in transaction for state column in 9.2+
+        if self.pgversion < 9.2:
+            # select procpid,datname,usename, client_addr, now(), query_start, substring(current_query,1,100), now() - query_start as duration from pg_stat_activity where current_query not ilike '<IDLE%' and current_query <> ''::text and now() - query_start > interval '5 minutes';
+            sql = "select count(*) from pg_stat_activity where current_query not ilike '<IDLE%' and current_query <> ''::text and now() - query_start > interval '5 minutes'"
+        else:
+            # select pid,datname,usename, client_addr, now(), state, query_start, substring(query,1,100), now() - query_start as duration from pg_stat_activity where state not ilike 'idle%' and query <> ''::text and now() - query_start > interval '5 minutes';
+            sql = "select count(*) from pg_stat_activity where state not ilike 'idle%' and query <> ''::text and now() - query_start > interval '5 minutes'"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+            errors = "Unable to get count of long running queries: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        long_queries_cnt = int(results)
+            
+        if long_queries_cnt == 0:
+            msg = "No \"long running queries\" longer than 5 minutes were detected."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Long Running Queries</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+        else:
+            msg = "%d \"long running queries\" longer than 5 minutes were detected." % long_queries_cnt
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Long Running Queries</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
+        if self.html_format:            
+            self.appendreport(html)
+        print msg
+
+        
+        ##########################################################
+        # Get lock waiting transactions where wait is > 30 seconds
+        ##########################################################
+        if self.pgversion < 9.2:
+          # select procpid, datname, usename, client_addr, now(), query_start, substring(current_query,1,100), now() - query_start as duration from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds';
+            sql = "select count(*) from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds'"
+        else:
+          # select pid, datname, usename, client_addr, now(), query_start, substring(query,1,100), now() - query_start as duration from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds';
+            sql = "select count(*) from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds'"        
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+            errors = "Unable to get count of blocked queries: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        blocked_queries_cnt = int(results)
+            
+        if long_queries_cnt == 0:
+            msg = "No \"Waiting/Blocked queries\" longer than 30 seconds were detected."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Waiting/Blocked queries</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
+        else:
+            msg = "%d \"Waiting/Blocked queries\" longer than 30 seconds were detected." % blocked_queries_cnt
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Waiting/Blocked queries</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
+        if self.html_format:            
+            self.appendreport(html)
+        print msg
+
 
         #################################
         # get archiving info if available
@@ -1124,10 +1221,15 @@ class maint:
         # database conflicts: only applies to PG versions greater or equal to 9.1.  9.2 has additional fields of interest: deadlocks and temp_files
         ###########################################################################################################################################
         if self.pgversion < 9.1:
-            print "No database conflicts found."
+            msg = "No database conflicts found."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Database Conflicts</font></td><td width=\"75%\"><font color=\"blue\">N/A</font></td></tr>"            
             return maint_globals.SUCCESS, ""        
-    
-        if self.pgversion == 9.1:
+            print msg
+            if self.html_format:
+                self.appendreport(html)
+            return maint_globals.SUCCESS, ""        
+
+        if self.pgversion < 9.2:
             sql="select datname, conflicts from pg_stat_database where datname = '%s'" % self.database
         else:
             sql="select datname, conflicts, deadlocks, temp_files from pg_stat_database where datname = '%s'" % self.database
@@ -1138,7 +1240,7 @@ class maint:
 	    aline = "%s" % (errors)         
 	    self.writeout(aline)
 	    return rc, errors     
-	# print "conflict results=%s" % results
+
 	cols = results.split('|')
 	database   = cols[0].strip()
 	conflicts  = int(cols[1].strip())
@@ -1156,11 +1258,54 @@ class maint:
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Database Conflicts</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"
         else:
             msg = "No database conflicts found."
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Database Conflicts</font></td><td width=\"75%\"><font color=\"blue\">None Found</font></td></tr>"            
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Database Conflicts</font></td><td width=\"75%\"><font color=\"blue\">No database conflicts found.</font></td></tr>"            
 
         print msg
         if self.html_format:
             self.appendreport(html)
+       
+       
+        ###############################################################################################################
+        # Check for checkpoint frequency
+        # NOTE: Checkpoints should happen every few minutes, not less than 5 minutes and not more than 15-30 minutes
+        #       unless recovery time is not a priority and High I/O SQL workload is in which case 1 hour is reasonable.
+        ###############################################################################################################
+        '''
+        https://momjian.us/main/writings/pgsql/hw_performance/
+        http://blog.2ndquadrant.com/measuring_postgresql_checkpoin/
+         total_checkpoints | minutes_between_checkpoints
+	-------------------+-----------------------------
+	              5243 |            56.2311032838769
+        (1 row)
+        '''
+        # SELECT total_checkpoints, seconds_since_start / total_checkpoints / 60 AS minutes_between_checkpoints FROM (SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time())) AS seconds_since_start, (checkpoints_timed+checkpoints_req) AS total_checkpoints FROM pg_stat_bgwriter) AS sub;
+        sql = "SELECT total_checkpoints, seconds_since_start / total_checkpoints / 60 AS minutes_between_checkpoints FROM (SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time())) AS seconds_since_start, (checkpoints_timed+checkpoints_req) AS total_checkpoints FROM pg_stat_bgwriter) AS sub"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+	rc, results = self.executecmd(cmd, False)
+	if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get checkpoint frequency: %d %s\nsql=%s\n" % (rc, results, sql)
+	    aline = "%s" % (errors)         
+	    self.writeout(aline)
+	    return rc, errors     
+
+	cols = results.split('|')
+	total_checkpoints = int(cols[0].strip())
+	minutes           = Decimal(cols[1].strip())
+	# print "total_checkpoints = %d  Minutes between checkpoints = %.2f" % (total_checkpoints, minutes)
+        if minutes < 5.0:
+            msg = "Checkpoints are occurring too fast, every %.2f minutes." % minutes
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
+        elif minutes > 60.0:
+            msg = "Checkpoints are occurring too infrequent, every %.2f minutes." % minutes
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"                        
+        else:
+            msg = "Checkpoints are occurring every %.2f minutes." % minutes
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"blue\">No database conflicts found.</font></td></tr>"            
+        print msg
+        if self.html_format:
+            self.appendreport(html)
+
+        
 
         ########################
         # orphaned large objects	    
@@ -1210,7 +1355,7 @@ class maint:
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Bloated Tables and/or Indexes</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
         else:
             self.bloatedtables = True
-            msg = "%d bloated tables/indexes were found." % int(results)        
+            msg = "%d bloated tables/indexes were found (See table list below)." % int(results)        
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Bloated Tables and/or Indexes</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
 
         print msg            
@@ -1236,7 +1381,7 @@ class maint:
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Unused Indexes</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
         else:
             self.unusedindexes = True
-            msg = "%d unused indexes were found." % int(results)        
+            msg = "%d unused indexes were found (See table list below)." % int(results)        
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Unused Indexes</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
 
         print msg            
@@ -1262,7 +1407,7 @@ class maint:
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Vacuum Freeze Candidates</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
         else:
             self.freezecandidates = True
-            msg = "%d vacuum freeze candidates were found." % int(results)        
+            msg = "%d vacuum freeze candidates were found (See table list below)." % int(results)        
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Vacuum Freeze Candidates</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
 
         print msg            
@@ -1288,7 +1433,7 @@ class maint:
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Vacuum Analyze Candidates</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
         else:
             self.analyzecandidates = True
-            msg = "%d vacuum analyze candidate(s) were found." % int(results)        
+            msg = "%d vacuum analyze candidate(s) were found (See table list below)." % int(results)        
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Vacuum Analyze Candidates</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
 
         print msg            
@@ -1400,9 +1545,51 @@ class maint:
 
 '''
 other things to consider for reporting, although they are redundant with zabbix
-1. Idle in transaction connections
-2. Long running queries 
-3. Lock waits
-4. checkpoints too frequent or infrequent (depends on logging)
-5. Warn if #connections close to max connections
+1. Implement these queries: http://blog.pandorafms.org/how-to-monitor-postgress/
+
+2. Checkpoints vs background writer:
+
+similar to preceding with this query: http://stackoverflow.com/questions/17699260/whats-the-unit-of-buffers-checkpoint-in-pg-stat-bgwriter-table
+SELECT (100 * checkpoints_req) / (checkpoints_timed + checkpoints_req) AS checkpoints_req_pct,    pg_size_pretty(buffers_checkpoint * block_size / (checkpoints_timed + checkpoints_req)) AS avg_checkpoint_write,  pg_size_pretty(block_size * (buffers_checkpoint + buffers_clean + buffers_backend)) AS total_written,  100 * buffers_checkpoint / (buffers_checkpoint + buffers_clean + buffers_backend) AS checkpoint_write_pct,    100 * buffers_backend / (buffers_checkpoint + buffers_clean + buffers_backend) AS backend_write_pct, * FROM pg_stat_bgwriter, (SELECT cast(current_setting('block_size') AS integer) AS block_size) bs;
+
+db=# select * from pg_stat_bgwriter;
+checkpoints_timed | checkpoints_req | buffers_checkpoint | buffers_clean | maxwritten_clean | buffers_backend | buffers_alloc
+------------------+-----------------+--------------------+---------------+------------------+-----------------+---------------
+              118 |             435 |            1925161 |        126291 |                7 |         1397373 |       2665693
+
+You had 118 checkpoints that happened because of checkpoint_timeout passing. 435 of them happened before that, typically those are because checkpoint_segments was reached. This suggests you might improve your checkpoint situation by increasing checkpoint_segments, but that's not a bad ratio. Increasing that parameter and spacing checkpoints further apart helps give the checkpoint spreading logic of checkpoint_completion_target more room to work over, which reduces the average load from the checkpoint process.
+During those checkpoints, 1,925,161 8K buffers were written out. That means on average, a typical checkpoint is writing 3481 buffers out, which works out to be 27.2MB each. Pretty low, but that's an average; there could have been some checkpoints that wrote a lot more while others wrote nothing, and you'd need to sample this data regularly to figure that out.
+
+The background writer cleaned 126,291 buffers (cleaned=wrote out dirty ones) during that time. 7 times, it wrote the maximum number it was allowed to before meeting its other goals. That's pretty low; if it were higher, it would be obvious you could gain some improvement by increasing bgwriter_lru_maxpages.
+
+Since last reset, 2,665,693 8K buffers were allocated to hold database pages. Out of those allocations, 1,397,373 times a database backend (probably the client itself) had to write a page in order to make space for the new allocation. That's not awful, but it's not great. You might try and get a higher percentage written by the background writer in advance of when the backend needs them by increasing bgwriter_lru_maxpages, bgwriter_lru_multiplier, and decreasing bgwriter_delay--making the changes in that order is the most effective strategy.
+
+
+> You'd probably be better off decreasing the delay rather than pushing up the other two parameters.  It's easy to tell if you did it right or not; just look at pg_stat_bgwriter.  If buffers_backend is high relative to the others, that means the multiplier or delay is wrong.  Or if maxwritten_clean is increasing fast, that means bgwriter_lru_maxpages is too low.
+>
+> checkpoints_timed = 261
+>
+> checkpoints_req = 0
+>
+> buffers_checkpoint = 49,058,438
+>
+> buffers_clean = 3,562,421
+>
+> maxwritten_clean = 243
+>
+> buffers_backend = 11,774,254
+>
+> buffers_alloc = 42,816,578
+>
+See how buffers_backend is much larger than buffers_clean, even though maxwritten_clean is low?  That means the background writer isn't running often enough to keep up with cleaning things, even though it does a lot of work when it does kick in.  In your situation I'd normally do a first pass by cutting bgwriter_lru_maxpages to 1/4 of what it is now, cut bgwriter_delay to 1/4 as well (to 50ms), and then see how the proportions change.  You can probably cut the multiplier, too, yet still see more pages written by the cleaner.
+
+> So, if I understand correctly, I should strive for a relative increase in buffers_clean to buffers_backend
+
+Right.  Buffers written by a backend are the least efficient way to get data out of the buffer cache, because the client running into that is stuck waiting for a write call before it can use the resuling free block.  You want to avoid those in favor of checkpoint and background-writer cleaner writes instead.
+
+http://grokbase.com/t/postgresql/pgsql-general/098bdhcdrh/help-interpreting-pg-stat-bgwriter-output
+
+Checkpoint write: most efficient
+Background writer write: still good
+Backend write, fsync, least efficient
 '''
