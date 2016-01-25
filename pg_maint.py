@@ -47,8 +47,9 @@
 # ./pg_maint.py -d test -a report
 #
 # Requirements:
-#   1. psql client 
-#   2. psutil for windows only https://pypi.python.org/pypi?:action=display&name=psutil#downloads
+#  1. python 2.6 or 2.7
+#  2. psql client 
+#  3. psutil for windows only: https://pypi.python.org/pypi?:action=display&name=psutil#downloads
 #      (fyi for gettting it on linux but not required: apt-get install python-psutil or yum install python-psutil)
 #
 # Download: git clone https://github.com/commandprompt/pg_maint.git pg_maint
