@@ -76,7 +76,7 @@ class maint:
         self.dir_delim         = ''
         self.totalmemGB        = -1
         self.pgbindir          = ''
-        self.pgversion         = 0.0
+        self.pgversion         = Decimal('0.0')
         self.html_format       = False
         self.programdir        = ''
         self.imageURL          = "https://cloud.githubusercontent.com/assets/339156/12404356/c5c9f374-be08-11e5-8cfb-2ab6df0eb4b0.jpg"
@@ -690,7 +690,7 @@ class maint:
         # primitive logic: make shared buffers minimum 4GB or maximum 12GB or 25% of total memory
         # newer versions of PG seem to be more efficient with higher values, so logic is:
         # if pg 9.3 or lower max is 8GB, if pg 9.4 or higher 12 GB max
-        if self.pgversion < 9.3:
+        if self.pgversion < Decimal('9.3'):
            MAXGB = 8
         else:
            MAXGB = 12
@@ -1015,7 +1015,8 @@ class maint:
         html = "<table class=\"table1\" style=\"width:100%\"> <caption><h3>Health Checks</h3></caption>" + \
                "<tr> <th>Status</th> <th>Category</th> <th>Analysis</th> </tr>" 
         self.appendreport(html)    
- 
+        
+        '''
         slavecnt = len(self.slaves)
         # still need to check for empty string as first slot
         if slavecnt == 1 and  self.slaves[0].strip() == '':
@@ -1028,7 +1029,8 @@ class maint:
         if self.html_format:
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Number of Slaves</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
             self.appendreport(html)            
-
+        '''
+        
         ##################### 
         # get cache hit ratio
         #####################
@@ -1045,10 +1047,10 @@ class maint:
 	blks_read   = int(cols[0].strip())
 	blks_hit    = int(cols[1].strip())
 	cache_ratio = Decimal(cols[2].strip())
-        if cache_ratio < 70.0:
+        if cache_ratio < Decimal('70.0'):
             msg = "low cache hit ratio: %.2f (blocks hit vs blocks read)" % cache_ratio
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10004;</font></td><td width=\"20%\"><font color=\"red\">Cache Hit Ratio</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"
-        elif cache_ratio < 90.0:
+        elif cache_ratio < Decimal('90.0'):
             msg = "Moderate cache hit ratio: %.2f (blocks hit vs blocks read)" % cache_ratio
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Cache Hit Ratio</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
         else:
@@ -1093,7 +1095,7 @@ class maint:
         #######################################################################        
         # NOTE: 9.1 uses procpid, current_query, and no state column, but 9.2+ uses pid, query and state columns respectively.  Also idle is <IDLE> in current_query for 9.1 and less
         #       <IDLE> in transaction for 9.1 but idle in transaction for state column in 9.2+        
-        if self.pgversion < 9.2:
+        if self.pgversion < Decimal('9.2'):
             # select substring(current_query,1,50), round(EXTRACT(EPOCH FROM (now() - query_start))), now(), query_start  from pg_stat_activity;
             sql = "select count(*) from pg_stat_activity where current_query ilike \'<IDLE> in transaction%\' and round(EXTRACT(EPOCH FROM (now() - query_start))) > 10"
         else:
@@ -1124,7 +1126,7 @@ class maint:
         ######################################
         # NOTE: 9.1 uses procpid, current_query, and no state column, but 9.2+ uses pid, query and state columns respectively.  Also idle is <IDLE> in current_query for 9.1 and less
         #       <IDLE> in transaction for 9.1 but idle in transaction for state column in 9.2+
-        if self.pgversion < 9.2:
+        if self.pgversion < Decimal('9.2'):
             # select procpid,datname,usename, client_addr, now(), query_start, substring(current_query,1,100), now() - query_start as duration from pg_stat_activity where current_query not ilike '<IDLE%' and current_query <> ''::text and now() - query_start > interval '5 minutes';
             sql = "select count(*) from pg_stat_activity where current_query not ilike '<IDLE%' and current_query <> ''::text and now() - query_start > interval '5 minutes'"
         else:
@@ -1153,7 +1155,7 @@ class maint:
         ##########################################################
         # Get lock waiting transactions where wait is > 30 seconds
         ##########################################################
-        if self.pgversion < 9.2:
+        if self.pgversion < Decimal('9.2'):
           # select procpid, datname, usename, client_addr, now(), query_start, substring(current_query,1,100), now() - query_start as duration from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds';
             sql = "select count(*) from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds'"
         else:
@@ -1220,7 +1222,7 @@ class maint:
         ########################################################################################################################################### 
         # database conflicts: only applies to PG versions greater or equal to 9.1.  9.2 has additional fields of interest: deadlocks and temp_files
         ###########################################################################################################################################
-        if self.pgversion < 9.1:
+        if self.pgversion < Decimal('9.1'):
             msg = "No database conflicts found."
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Database Conflicts</font></td><td width=\"75%\"><font color=\"blue\">N/A</font></td></tr>"            
             return maint_globals.SUCCESS, ""        
@@ -1229,7 +1231,7 @@ class maint:
                 self.appendreport(html)
             return maint_globals.SUCCESS, ""        
 
-        if self.pgversion < 9.2:
+        if self.pgversion < Decimal('9.2'):
             sql="select datname, conflicts from pg_stat_database where datname = '%s'" % self.database
         else:
             sql="select datname, conflicts, deadlocks, temp_files from pg_stat_database where datname = '%s'" % self.database
@@ -1292,10 +1294,10 @@ class maint:
 	total_checkpoints = int(cols[0].strip())
 	minutes           = Decimal(cols[1].strip())
 	# print "total_checkpoints = %d  Minutes between checkpoints = %.2f" % (total_checkpoints, minutes)
-        if minutes < 5.0:
+        if minutes < Decimal('5.0'):
             msg = "Checkpoints are occurring too fast, every %.2f minutes." % minutes
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
-        elif minutes > 60.0:
+        elif minutes > Decimal('60.0'):
             msg = "Checkpoints are occurring too infrequent, every %.2f minutes." % minutes
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"                        
         else:
