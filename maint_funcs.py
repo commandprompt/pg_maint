@@ -1305,7 +1305,57 @@ class maint:
         if self.html_format:
             self.appendreport(html)
 
+        ############################################################
+        # Check checkpoints, background writers, and backend writers
+        ############################################################
+        sql = "select checkpoints_timed, checkpoints_req, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc, (100 * checkpoints_req) / (checkpoints_timed + checkpoints_req) AS checkpoints_req_pct,    pg_size_pretty(buffers_checkpoint * block_size / (checkpoints_timed + checkpoints_req)) AS avg_checkpoint_write,  pg_size_pretty(block_size * (buffers_checkpoint + buffers_clean + buffers_backend)) AS total_written,  100 * buffers_checkpoint / (buffers_checkpoint + buffers_clean + buffers_backend) AS checkpoint_write_pct,    100 * buffers_clean / (buffers_checkpoint + buffers_clean + buffers_backend) AS background_write_pct, 100 * buffers_backend / (buffers_checkpoint + buffers_clean + buffers_backend) AS backend_write_pct from pg_stat_bgwriter, (SELECT cast(current_setting('block_size') AS integer) AS block_size) bs"
+
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+	rc, results = self.executecmd(cmd, False)
+	if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get background/backend writers: %d %s\nsql=%s\n" % (rc, results, sql)
+	    aline = "%s" % (errors)         
+	    self.writeout(aline)
+	    return rc, errors     
+
+	cols = results.split('|')
+        checkpoints_timed     = int(cols[0].strip())
+        checkpoints_req       = int(cols[1].strip())
+        buffers_checkpoint    = int(cols[2].strip())
+        buffers_clean         = int(cols[3].strip())
+        maxwritten_clean      = int(cols[4].strip())
+        buffers_backend       = int(cols[5].strip())
+        buffers_backend_fsync = int(cols[6].strip())
+        buffers_alloc         = int(cols[7].strip())
+        checkpoints_req_pct   = int(cols[8].strip())
+        avg_checkpoint_write  = cols[9].strip()
+        total_written         = cols[10].strip()
+        checkpoint_write_pct  = int(cols[11].strip())
+        background_write_pct  = int(cols[12].strip())
+        backend_write_pct     = int(cols[13].strip())        
+        if self.verbose:
+            msg = "chkpt_time=%d chkpt_req=%d  buff_chkpt=%d  buff_clean=%d  maxwritten_clean=%d  buff_backend=%d  buff_backend_fsync=%d  buff_alloc=%d, chkpt_req_pct=%d avg_chkpnt_write=%s total_written=%s chkpnt_write_pct=%d background_write_pct=%d  backend_write_pct=%d" \
+            % (checkpoints_timed, checkpoints_req, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc, checkpoints_req_pct, avg_checkpoint_write, total_written, checkpoint_write_pct, background_write_percent, backend_write_pct)
+            print msg
         
+        msg = ''
+        if buffers_backend_fsync > 0:
+            msg = "bgwriter fsync request queue is full. Backend using fsync.  "
+        if backend_write_pct > (checkpoint_write_pct + background_write_pct):
+            msg += "backend writer doing most of the work.  Consider decreasing \"bgwriter_delay\" by 50% or more to make background writer do more of the work.  "
+        if maxwritten_clean > 500000:            
+            # for now just use a hard coded value of 500K til we understand the math about this better
+            msg += "background writer stopped cleaning scan %d times because it had written too many buffers.  Consider increasing \"bgwriter_lru_maxpages\".  " % maxwritten_clean
+        if checkpoints_timed > (checkpoints_req * 5):
+            msg += "\"checkpoint_timeout\" contributing to a lot more checkpoints (%d) than \"checkpoint_segments\" (%d).  Consider increasing \"checkpoint_timeout\".  " % (checkpoints_timed, checkpoints_req)
+        if msg <> '':
+            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint/Background/Backend Writers</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
+        else:
+            msg = "No problems detected with checkpoint, background, or backend writers."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Checkpoint/Background/Backend Writers</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"   
+        print msg
+        if self.html_format:
+            self.appendreport(html)
 
         ########################
         # orphaned large objects	    
@@ -1441,6 +1491,55 @@ class maint:
             self.appendreport(html)
 
 
+        #######################################
+        # network health checks begin here
+        # ONLY applies to linux at current time
+        #######################################
+        
+        if self.opsys == 'posix':
+
+
+            # Check for high number of standby connections, i.e., TIME_WAIT states
+            # This usually indicates a lot of short-lived connections and the absence of a connection pooler
+            '''
+            Due to the way TCP/IP works, connections can not be closed immediately. Packets may arrive out of order or be retransmitted after the connection has been closed. CLOSE_WAIT indicates that the remote endpoint (other side of the connection) has closed the connection. TIME_WAIT indicates that local endpoint (this side) has closed the connection. The connection is being kept around so that any delayed packets can be matched to the connection and handled appropriately. The connections will be removed when they time out within four minutes.  Basically the "WAIT" states mean that one side closed the connection but the final confirmation of the close is pending.
+	    
+	    ss -an state time-wait | wc -l
+	    netstat -nat | egrep 'TIME_WAIT' | wc -l
+	    netstat -ntu  | grep TIME_WAIT | wc -l
+	    
+	    Now, let's see why this state can be annoying on a server handling a lot of connections. There are three aspects of the problem:
+	    the slot taken in the connection table preventing new connections of the same kind,
+	    the memory occupied by the socket structure in the kernel, and
+	    the additional CPU usage.
+	    A connection in the TIME-WAIT state is kept for one minute in the connection table. This means, another connection with the same quadruplet (source address, source port, destination address, destination port) cannot exist.
+	    The result of ss -tan state time-wait | wc -l is not a problem per se!
+            '''
+            
+            cmd =  "ss -an state time-wait | wc -l"
+            rc, results = self.executecmd(cmd, False)
+            if rc <> maint_globals.SUCCESS:
+    	        errors = "Unable to get network standby connections count: %d %s\nsql=%s\n" % (rc, results, sql)
+                aline = "%s" % (errors)         
+                self.writeout(aline)
+                return rc, errors     
+            standby = int(results)
+            if standby < 1000:
+                msg = "Network: Relatively few network standby connections (%d)." % standby
+                html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Network Standby Connections</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
+            else:
+                msg = "Network: High number of standby connections: %d.  This may indicate a lot of short-lived connections and the absence of a connection pooler." % standby
+                html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Network Standby Connections</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
+
+            print msg            
+            if self.html_format:
+                self.appendreport(html)
+
+
+        ########################################        
+        ### end of linux only network checks ###
+        ########################################
+
         # finish special table format
         self.appendreport("</table>")
         self.appendreport("<p><br></p>")                                        
@@ -1543,53 +1642,4 @@ class maint:
                 
 ################################################################################################################
 
-'''
-other things to consider for reporting, although they are redundant with zabbix
-1. Implement these queries: http://blog.pandorafms.org/how-to-monitor-postgress/
 
-2. Checkpoints vs background writer:
-
-similar to preceding with this query: http://stackoverflow.com/questions/17699260/whats-the-unit-of-buffers-checkpoint-in-pg-stat-bgwriter-table
-SELECT (100 * checkpoints_req) / (checkpoints_timed + checkpoints_req) AS checkpoints_req_pct,    pg_size_pretty(buffers_checkpoint * block_size / (checkpoints_timed + checkpoints_req)) AS avg_checkpoint_write,  pg_size_pretty(block_size * (buffers_checkpoint + buffers_clean + buffers_backend)) AS total_written,  100 * buffers_checkpoint / (buffers_checkpoint + buffers_clean + buffers_backend) AS checkpoint_write_pct,    100 * buffers_backend / (buffers_checkpoint + buffers_clean + buffers_backend) AS backend_write_pct, * FROM pg_stat_bgwriter, (SELECT cast(current_setting('block_size') AS integer) AS block_size) bs;
-
-db=# select * from pg_stat_bgwriter;
-checkpoints_timed | checkpoints_req | buffers_checkpoint | buffers_clean | maxwritten_clean | buffers_backend | buffers_alloc
-------------------+-----------------+--------------------+---------------+------------------+-----------------+---------------
-              118 |             435 |            1925161 |        126291 |                7 |         1397373 |       2665693
-
-You had 118 checkpoints that happened because of checkpoint_timeout passing. 435 of them happened before that, typically those are because checkpoint_segments was reached. This suggests you might improve your checkpoint situation by increasing checkpoint_segments, but that's not a bad ratio. Increasing that parameter and spacing checkpoints further apart helps give the checkpoint spreading logic of checkpoint_completion_target more room to work over, which reduces the average load from the checkpoint process.
-During those checkpoints, 1,925,161 8K buffers were written out. That means on average, a typical checkpoint is writing 3481 buffers out, which works out to be 27.2MB each. Pretty low, but that's an average; there could have been some checkpoints that wrote a lot more while others wrote nothing, and you'd need to sample this data regularly to figure that out.
-
-The background writer cleaned 126,291 buffers (cleaned=wrote out dirty ones) during that time. 7 times, it wrote the maximum number it was allowed to before meeting its other goals. That's pretty low; if it were higher, it would be obvious you could gain some improvement by increasing bgwriter_lru_maxpages.
-
-Since last reset, 2,665,693 8K buffers were allocated to hold database pages. Out of those allocations, 1,397,373 times a database backend (probably the client itself) had to write a page in order to make space for the new allocation. That's not awful, but it's not great. You might try and get a higher percentage written by the background writer in advance of when the backend needs them by increasing bgwriter_lru_maxpages, bgwriter_lru_multiplier, and decreasing bgwriter_delay--making the changes in that order is the most effective strategy.
-
-
-> You'd probably be better off decreasing the delay rather than pushing up the other two parameters.  It's easy to tell if you did it right or not; just look at pg_stat_bgwriter.  If buffers_backend is high relative to the others, that means the multiplier or delay is wrong.  Or if maxwritten_clean is increasing fast, that means bgwriter_lru_maxpages is too low.
->
-> checkpoints_timed = 261
->
-> checkpoints_req = 0
->
-> buffers_checkpoint = 49,058,438
->
-> buffers_clean = 3,562,421
->
-> maxwritten_clean = 243
->
-> buffers_backend = 11,774,254
->
-> buffers_alloc = 42,816,578
->
-See how buffers_backend is much larger than buffers_clean, even though maxwritten_clean is low?  That means the background writer isn't running often enough to keep up with cleaning things, even though it does a lot of work when it does kick in.  In your situation I'd normally do a first pass by cutting bgwriter_lru_maxpages to 1/4 of what it is now, cut bgwriter_delay to 1/4 as well (to 50ms), and then see how the proportions change.  You can probably cut the multiplier, too, yet still see more pages written by the cleaner.
-
-> So, if I understand correctly, I should strive for a relative increase in buffers_clean to buffers_backend
-
-Right.  Buffers written by a backend are the least efficient way to get data out of the buffer cache, because the client running into that is stuck waiting for a write call before it can use the resuling free block.  You want to avoid those in favor of checkpoint and background-writer cleaner writes instead.
-
-http://grokbase.com/t/postgresql/pgsql-general/098bdhcdrh/help-interpreting-pg-stat-bgwriter-output
-
-Checkpoint write: most efficient
-Background writer write: still good
-Backend write, fsync, least efficient
-'''
