@@ -94,9 +94,7 @@
 #  8. list tables that have not been analyzed or vacuumed in the last 60 days or whose size has grown significantly. 
 #
 # TODOs:
-#    1. Handle pg_stat_activity to be compatible across pg versions. 
-#       9.1 uses procpid, current_query, but 9.2+ uses pid, query respectively
-#    2. jd: we want pg_maint to optionally work with pg_agent to create a job to do vacuum freeze
+#    1. jd: we want pg_maint to optionally work with pg_agent to create a job to do vacuum freeze
 #       so we could say pg_maint --vacuum-freeze --schedule '01/20/2015 2:00AM';
 #       and pg_agent would schedule that 
 #       including the following would be awesome pg_maint --report --html 
