@@ -10,8 +10,9 @@ You can see a sample report here:
 Bugs can be reported @ https://public.commandprompt.com/projects/pgmaint
 
 ## Requirements
-1. psql client 
-2. psutil for windows only: https://pypi.python.org/pypi?:action=display&name=psutil#downloads
+1. python 2.6 or 2.7
+2. psql client 
+3. psutil for windows only: https://pypi.python.org/pypi?:action=display&name=psutil#downloads
 
 ## TODOS
 1. Handle pg_stat_activity to be compatible across pg versions. 
