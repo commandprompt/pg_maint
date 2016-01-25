@@ -1272,16 +1272,7 @@ class maint:
         # NOTE: Checkpoints should happen every few minutes, not less than 5 minutes and not more than 15-30 minutes
         #       unless recovery time is not a priority and High I/O SQL workload is in which case 1 hour is reasonable.
         ###############################################################################################################
-        '''
-        https://momjian.us/main/writings/pgsql/hw_performance/
-        http://blog.2ndquadrant.com/measuring_postgresql_checkpoin/
-         total_checkpoints | minutes_between_checkpoints
-	-------------------+-----------------------------
-	              5243 |            56.2311032838769
-        (1 row)
-        '''
-        # SELECT total_checkpoints, seconds_since_start / total_checkpoints / 60 AS minutes_between_checkpoints FROM (SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time())) AS seconds_since_start, (checkpoints_timed+checkpoints_req) AS total_checkpoints FROM pg_stat_bgwriter) AS sub;
-        sql = "SELECT total_checkpoints, seconds_since_start / total_checkpoints / 60 AS minutes_between_checkpoints FROM (SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time())) AS seconds_since_start, (checkpoints_timed+checkpoints_req) AS total_checkpoints FROM pg_stat_bgwriter) AS sub"
+        sql = "SELECT total_checkpoints, seconds_since_start / total_checkpoints / 60 AS minutes_between_checkpoints, checkpoints_timed, checkpoints_req, checkpoint_write_time, checkpoint_sync_time FROM (SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time())) AS seconds_since_start, (checkpoints_timed+checkpoints_req) AS total_checkpoints, checkpoints_timed, checkpoints_req, checkpoint_write_time / 1000 as checkpoint_write_time, checkpoint_sync_time / 1000 as checkpoint_sync_time FROM pg_stat_bgwriter) AS sub"
         cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
 	rc, results = self.executecmd(cmd, False)
 	if rc <> maint_globals.SUCCESS:
@@ -1291,18 +1282,25 @@ class maint:
 	    return rc, errors     
 
 	cols = results.split('|')
-	total_checkpoints = int(cols[0].strip())
-	minutes           = Decimal(cols[1].strip())
-	# print "total_checkpoints = %d  Minutes between checkpoints = %.2f" % (total_checkpoints, minutes)
+	total_checkpoints     = int(cols[0].strip())
+	minutes               = Decimal(cols[1].strip())
+	checkpoints_timed     = int(cols[2].strip())
+	checkpoints_req       = int(cols[3].strip())
+        checkpoint_write_time = int(float(cols[4].strip()))
+        checkpoint_sync_time  = int(float(cols[5].strip()))        \
+        # calculate average checkpoint time
+        avg_checkpoint_seconds = ((checkpoint_write_time + checkpoint_sync_time) / (checkpoints_timed + checkpoints_req)) 
+	
         if minutes < Decimal('5.0'):
-            msg = "Checkpoints are occurring too fast, every %.2f minutes." % minutes
+            msg = "Checkpoints are occurring too fast, every %.2f minutes, and taking about %d minutes on average." % (minutes, (avg_checkpoint_seconds / 60))
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
         elif minutes > Decimal('60.0'):
-            msg = "Checkpoints are occurring too infrequent, every %.2f minutes." % minutes
+            msg = "Checkpoints are occurring too infrequently, every %.2f minutes, and taking about %d minutes on average." % (minutes, (avg_checkpoint_seconds / 60))
             html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"                        
         else:
-            msg = "Checkpoints are occurring every %.2f minutes." % minutes
+            msg = "Checkpoints are occurring every %.2f minutes, and taking about %d minutes on average." % (minutes, (avg_checkpoint_seconds / 60))
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"   
+            
         print msg
         if self.html_format:
             self.appendreport(html)
@@ -1310,7 +1308,7 @@ class maint:
         ############################################################
         # Check checkpoints, background writers, and backend writers
         ############################################################
-        sql = "select checkpoints_timed, checkpoints_req, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc, (100 * checkpoints_req) / (checkpoints_timed + checkpoints_req) AS checkpoints_req_pct,    pg_size_pretty(buffers_checkpoint * block_size / (checkpoints_timed + checkpoints_req)) AS avg_checkpoint_write,  pg_size_pretty(block_size * (buffers_checkpoint + buffers_clean + buffers_backend)) AS total_written,  100 * buffers_checkpoint / (buffers_checkpoint + buffers_clean + buffers_backend) AS checkpoint_write_pct,    100 * buffers_clean / (buffers_checkpoint + buffers_clean + buffers_backend) AS background_write_pct, 100 * buffers_backend / (buffers_checkpoint + buffers_clean + buffers_backend) AS backend_write_pct from pg_stat_bgwriter, (SELECT cast(current_setting('block_size') AS integer) AS block_size) bs"
+        sql = "select checkpoints_timed, checkpoints_req, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc, checkpoint_write_time / 1000 as checkpoint_write_time, checkpoint_sync_time / 1000 as checkpoint_sync_time, (100 * checkpoints_req) / (checkpoints_timed + checkpoints_req) AS checkpoints_req_pct,    pg_size_pretty(buffers_checkpoint * block_size / (checkpoints_timed + checkpoints_req)) AS avg_checkpoint_write,  pg_size_pretty(block_size * (buffers_checkpoint + buffers_clean + buffers_backend)) AS total_written,  100 * buffers_checkpoint / (buffers_checkpoint + buffers_clean + buffers_backend) AS checkpoint_write_pct,    100 * buffers_clean / (buffers_checkpoint + buffers_clean + buffers_backend) AS background_write_pct, 100 * buffers_backend / (buffers_checkpoint + buffers_clean + buffers_backend) AS backend_write_pct from pg_stat_bgwriter, (SELECT cast(current_setting('block_size') AS integer) AS block_size) bs"
 
         cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
 	rc, results = self.executecmd(cmd, False)
@@ -1329,16 +1327,22 @@ class maint:
         buffers_backend       = int(cols[5].strip())
         buffers_backend_fsync = int(cols[6].strip())
         buffers_alloc         = int(cols[7].strip())
-        checkpoints_req_pct   = int(cols[8].strip())
-        avg_checkpoint_write  = cols[9].strip()
-        total_written         = cols[10].strip()
-        checkpoint_write_pct  = int(cols[11].strip())
-        background_write_pct  = int(cols[12].strip())
-        backend_write_pct     = int(cols[13].strip())        
+        checkpoint_write_time = int(float(cols[8].strip()))
+        checkpoint_sync_time  = int(float(cols[9].strip()))
+        checkpoints_req_pct   = int(cols[10].strip())
+        avg_checkpoint_write  = cols[11].strip()
+        total_written         = cols[12].strip()
+        checkpoint_write_pct  = int(cols[13].strip())
+        background_write_pct  = int(cols[14].strip())
+        backend_write_pct     = int(cols[15].strip())        
+        
+        # calculate average checkpoint time
+        avg_checkpoint_seconds = ((checkpoint_write_time + checkpoint_sync_time) / (checkpoints_timed + checkpoints_req)) 
+
         if self.verbose:
-            msg = "chkpt_time=%d chkpt_req=%d  buff_chkpt=%d  buff_clean=%d  maxwritten_clean=%d  buff_backend=%d  buff_backend_fsync=%d  buff_alloc=%d, chkpt_req_pct=%d avg_chkpnt_write=%s total_written=%s chkpnt_write_pct=%d background_write_pct=%d  backend_write_pct=%d" \
-            % (checkpoints_timed, checkpoints_req, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc, checkpoints_req_pct, avg_checkpoint_write, total_written, checkpoint_write_pct, background_write_percent, backend_write_pct)
-            print msg
+            msg = "chkpt_time=%d chkpt_req=%d  buff_chkpt=%d  buff_clean=%d  maxwritten_clean=%d  buff_backend=%d  buff_backend_fsync=%d  buff_alloc=%d, chkpt_req_pct=%d avg_chkpnt_write=%s total_written=%s chkpnt_write_pct=%d background_write_pct=%d  backend_write_pct=%d avg_checkpoint_time=%d seconds" \
+            % (checkpoints_timed, checkpoints_req, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc, checkpoints_req_pct, avg_checkpoint_write, total_written, checkpoint_write_pct, background_write_pct, backend_write_pct, avg_checkpoint_seconds)
+            print msg        
         
         msg = ''
         if buffers_backend_fsync > 0:
@@ -1355,6 +1359,7 @@ class maint:
         else:
             msg = "No problems detected with checkpoint, background, or backend writers."
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Checkpoint/Background/Backend Writers</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"   
+
         print msg
         if self.html_format:
             self.appendreport(html)
