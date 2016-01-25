@@ -47,6 +47,6 @@ NOTICE    = 2
 DESCRIPTION="This python utility program performs PostgreSQL maintenance tasks."
 VERSION    = 1.0
 PROGNAME   = "pg_maint"
-ADATE      = "January 24, 2016"
+ADATE      = "January 25, 2016"
 
 
