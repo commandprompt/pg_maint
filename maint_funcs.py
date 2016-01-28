@@ -85,6 +85,9 @@ class maint:
         self.unusedindexes     = False
         self.freezecandidates  = False
         self.analyzecandidates = False
+        self.workwindowmins    = 7200  # default max is 5 days
+        self.max_ready_files   = 1000
+        self.timestartmins     = time.time() / 60
        
         # db config stuff
         self.archive_mode      = ''
@@ -97,19 +100,21 @@ class maint:
         
 
     ###########################################################
-    def set_dbinfo(self, action, dbhost, dbport, dbuser, database, schema, smart_mode, load_threshold, max_rows, html_format, dry_run, verbose, argv):
-        self.action         = action.upper()
-        self.dbhost         = dbhost
-        self.dbport         = dbport
-        self.dbuser         = dbuser
-        self.database       = database
-        self.schema         = schema
-        self.smart_mode     = smart_mode
-        self.load_threshold = -1 if load_threshold == "" else int(load_threshold)
-        self.max_rows       = 10000000 if max_rows == "" else int(max_rows)
-        self.html_format    = html_format
-        self.dry_run        = dry_run
-        self.verbose        = verbose
+    def set_dbinfo(self, action, dbhost, dbport, dbuser, database, schema, smart_mode, load_threshold, max_rows, work_window, max_ready_files, html_format, dry_run, verbose, argv):
+        self.action          = action.upper()
+        self.dbhost          = dbhost
+        self.dbport          = dbport
+        self.dbuser          = dbuser
+        self.database        = database
+        self.schema          = schema
+        self.smart_mode      = smart_mode
+        self.load_threshold  = -1 if load_threshold == "" else int(load_threshold)
+        self.max_rows        = 10000000 if max_rows == "" else int(max_rows)
+        self.workwindowmins  = 7200 if work_window == "" else int(work_window)
+        self.max_ready_files = 1000 if max_ready_files == "" else int(max_ready_files)
+        self.html_format     = html_format
+        self.dry_run         = dry_run
+        self.verbose         = verbose
          
         # process the schema or table elements
         total   = len(argv)
@@ -163,6 +168,10 @@ class maint:
 	if 'psql' not in results:    
 	    msg = "psql must be in the path. rc=%d, results=%s" % (rc, results)    
 	    return maint_globals.ERROR, msg 
+       
+        pos = results.find('psql')
+        if pos > 0:
+            self.pgbindir = results[0:pos]
 
         rc, results = self.get_configinfo()
         if rc <> maint_globals.SUCCESS:
@@ -222,6 +231,7 @@ class maint:
                 aline = "%s" % (errors)         
                 self.writeout(aline)
                 return rc, errors
+            #print "rc=%d results=%s" % (rc,results)
             results = results.split('=')
             totalmem_prettyGB = int(results[1].strip())
         else:
@@ -241,6 +251,11 @@ class maint:
         if self.connected:
             # do something here later if we enable a db driver
             self.connected = false
+        # print "deleting temp file: %s" % self.tempfile
+        try:
+            os.remove(self.tempfile)
+        except OSError:
+            pass            
         return
 
     ###########################################################
@@ -315,8 +330,7 @@ class maint:
             fields = aline.split('|')
             name = fields[0].strip()
             setting = fields[1].strip()
-            if self.verbose:
-                print "name=%s  setting=%s" % (name, setting)
+            # print "name=%s  setting=%s" % (name, setting)
 
             if name == 'data_directory':
                 self.datadir = setting
@@ -352,35 +366,36 @@ class maint:
         return maint_globals.SUCCESS, results
 
     ###########################################################
-    # psql -p 5432 -t veda -c "select count(*)from pg_stat_activity"
     def executecmd(self, cmd, expect):
         if self.verbose:
             print "executecmd --> %s" % cmd
             
         # NOTE: try and catch does not work for Popen    
         try:
-            # p = Popen(cmd, shell=True, stdout=PIPE)
-            # p = subprocess.Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
-            p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
+            # Popen(args, bufsize=0, executable=None, stdin=None, stdout=None, stderr=None, preexec_fn=None, close_fds=False, shell=False, cwd=None, env=None, universal_newlines=False, startupinfo=None, creationflags=0)        
+            if self.opsys == 'posix':
+                p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE, executable="/bin/bash")
+            else:
+                p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
             values, err = p.communicate()            
             
         except exceptions.OSError as e:
             print "exceptions.OSError Error",e
             return maint_globals.ERROR, "Error(1)"         
-        except BaseException:
-            print "BaseException Error"
+        except BaseException as e:
+            print "BaseException Error",e
             return maint_globals.ERROR, "Error(2)"            
-        except OSError:
-            print "OSError Error"
+        except OSError as e:
+            print "OSError Error", e
             return maint_globals.ERROR, "Error(3)"    
-        except RuntimeError:
-            print "RuntimeError"
+        except RuntimeError as e:
+            print "RuntimeError", e
             return maint_globals.ERROR, "Error(4)"      
-        except ValueError:
-            print "Value Error"
+        except ValueError as e:
+            print "Value Error", e
             return maint_globals.ERROR, "Error(5)"              
-        except Exception:
-            print "General Exception Error"
+        except Exception as e:
+            print "General Exception Error", e
             return maint_globals.ERROR, "Error(6)"    
         except:
             print "Unexpected error:", sys.exc_info()[0]
@@ -474,8 +489,6 @@ class maint:
     ###########################################################
     def get_pgbindir(self):
 
-        self.pgbindir   = ''
-
         if self.opsys == 'posix':
             cmd = "pg_config | grep BINDIR"
         else:
@@ -483,11 +496,14 @@ class maint:
 
         rc, results = self.executecmd(cmd, True)
         if rc <> maint_globals.SUCCESS:
-	    errors = "unable to get PG Bind Directory.  rc=%d %s\n" % (rc, results)
-            aline = "%s" % (errors)         
-            
-            self.writeout(aline)
-            return rc, errors
+            # don't consider failure unless bindir not already populated by "which psql" command that executed earlier
+            if self.pgbindir == "":
+   	        errors = "unable to get PG Bind Directory.  rc=%d %s\n" % (rc, results)
+                aline = "%s" % (errors)         
+                self.writeout(aline)
+                return rc, errors
+            else:
+                return maint_globals.SUCCESS, self.pgbindir
         
         results = results.split('=')
         self.pgbindir   = results[1].strip()
@@ -551,12 +567,16 @@ class maint:
             
         load = Decimal(results)
         if load > self.load_threshold:
-            return maint_globals.WARNING, "Current load (%.2f%%) > Threshold load (%d%%).  Program will terminate." % (load, self.load_threshold)
+            return maint_globals.HIGHLOAD, "Current load (%.2f%%) > Threshold load (%d%%)" % (load, self.load_threshold)
         else:
-            return maint_globals.SUCCESS, "Current load (%.2f%%) < Threshold load (%d%%)" % (load, self.load_threshold)
+            return maint_globals.SUCCESS,  "Current load (%.2f%%) < Threshold load (%d%%)" % (load, self.load_threshold)
 
     ###########################################################
     def get_slaves(self):
+    
+        if self.pgversion < Decimal('9.1'):
+            # pg_stat_replication table does not exist
+            return maint_globals.SUCCESS, ""            
     
         sql = "select client_addr from pg_stat_replication where state = 'streaming' order by 1"
         cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
@@ -1553,13 +1573,51 @@ class maint:
 
 
         return maint_globals.SUCCESS, ""            
+
+
+    ###########################################################
+    def delay(self, freeze):
+
+        while True:
+            # see if we passed work window threshold, assume minimum work windows is always 1 hour.
+            workmins = ((time.time() / 60) - self.timestartmins)
+            if workmins >= self.workwindowmins:
+                results = "Work window (%d mins.) expired (%d mins.) Program terminating before work completed." % (self.workwindowmins, workmins)
+                print results
+                return maint_globals.TOOLONG, results
+             
+            # see if load is too high
+            rc, results = self.check_load()
+            if rc == maint_globals.HIGHLOAD:
+                # wait 10 minutes before trying again
+                # print "deferring action (%s) for 10 minutes due to high load.  %s" % (self.action, results)
+                # time.sleep(600)
+                print "deferring action (%s) for 30 seconds due to high load (%s).  Current work time minutes(%d) Max work time minutes (%d)" % (self.action, results, workmins, self.workwindowmins)
+                time.sleep(30)                
+                continue
+            elif freeze:
+                # make sure we aren't getting too far behind in WALs ready to be archived.
+                rc, results = self.get_readycnt()
+                if rc <> maint_globals.SUCCESS:
+	            errors = "Unable to get archiving status: %d %s\n" % (rc, results)
+                    aline = "%s" % (errors)         
+                    self.writeout(aline)
+                    return rc, errors     
+                    
+                readycnt = int(results)
+                if readycnt > self.max_ready_files:
+                    print "deferring action (%s) for 30 seconds due to high cnt of files waiting to be archived (%d)." % readycnt
+                    time.sleep(30)                
+                    continue
+                else:
+                    break
+            else:
+                break
+   
+        return maint_globals.SUCCESS, ""                                
         
     ###########################################################
     def do_vac_and_analyze(self):
-
-        rc, results = self.check_load()
-        if rc == maint_globals.WARNING:
-            return rc, results
 
         if self.action not in ('ANALYZE','VACUUM_ANALYZE', 'VACUUM_FREEZE'):
             return maint_globals.NOTICE, "N/A"
@@ -1567,14 +1625,15 @@ class maint:
         # find tables whose row size is greater than threshold and thus will be deferred, i.e., work file created, but not executed.
         sql = "select '%s ' || n.nspname || '.' || c.relname || ';' as ddl from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where t.schemaname = n.nspname and t.tablename = c.relname and c.relname = u.relname %s and n.nspname not in ('information_schema','pg_catalog') and c.reltuples > %d order by n.nspname, c.relname" \
         % (self.actstring, self.schemaclause, self.max_rows)
-        
+        if self.verbose:
+            print sql
         if self.html_format:
             cmd = "psql %s --html -t -c \"%s\" > %s" % (self.connstring, sql, self.workfile_deferred)        
         else:
             cmd = "psql %s -t -c \"%s\" > %s" % (self.connstring, sql, self.workfile_deferred)
         rc, results = self.executecmd(cmd, False)
         if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get deferred sql: %d %s\n" % (rc,results)
+            errors = "Unable to get deferred sql: %d %s\n" % (rc,results)
             aline = "%s" % (errors)         
             self.writeout(aline)
             return rc, errors        
@@ -1621,29 +1680,54 @@ class maint:
             print "%d table(s) qualify for maintenance: %s" % (lines, self.workfile)
         else:
             print "No tables qualify for maintenance."
+            return maint_globals.SUCCESS, ""            
 
         if self.schema == '':
-             print "%s %s database-wide %s in progress..." % (adate, "Extensive" if self.smart_mode else "Smart", self.action)
+             print "%s %s database-wide %s in progress..." % (adate, "Smart" if self.smart_mode else "Extensive", self.action)
         else:
-             print "%s %s schema-wide %s in progress..." % (adate, "Extensive" if self.smart_mode else "Smart", self.action)    
-
-        if self.dry_run == 1:
-            print "Dry Run ended."             
-            return maint_globals.SUCCESS, ""    
-            
+             print "%s %s schema-wide %s in progress..." % (adate, "Smart" if self.smart_mode else "Extensive", self.action)    
         
-        # now execute the analyze commands in the workfile
-        cmd = "psql %s < %s" % (self.connstring, self.workfile)
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to execute work file commands: %d --> %s  %s\n" % (rc, self.workfile, results)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
+        # Version 1.1: instead of executing as a batch, read in and process each table in a loop
+        f = open(self.workfile, "r")    
+        lineno = 0
+        count  = 0
+        
+        for line in f:
+            lineno = lineno + 1
+            aline = line.strip()
+            if len(aline) < 1:
+                continue
 
-        print "%s %s\n" % (adate, results)     
+            # sleep if load is too high and if work window has passed, return rc to indicate abort.
+            rc, results = self.delay(True);
+            if rc == maint_globals.TOOLONG:
+                print results
+                return rc, results
+            elif rc <> maint_globals.SUCCESS:
+                print "delay error: rc=%d %s" % (rc, results)
+                return rc, results            
+
+            adate = self.getnow()            
+            
+            if self.dry_run == 1:
+                print "%s:  simulate executing --> %s" % (adate, aline)
+                continue
+
+            print "%s:  executing --> %s" % (adate, aline)            
+            
+            cmd = "psql %s -t -c \"%s\"" % (self.connstring, aline)
+            rc, results = self.executecmd(cmd, False)
+            if rc <> maint_globals.SUCCESS:
+    	        errors = "rc=%d  Unable to execute command: %s\n" % (rc, results, aline)
+                aline = "%s" % (errors)         
+                self.writeout(aline)
+                return rc, errors    
+ 
+        f.close()
+        
         adate = self.getnow()
-        print "%s work file commands completed" % (adate)    
+        workmins = ((time.time() / 60) - self.timestartmins)        
+        print "%s work file commands completed. Total time: %d minutes " % (adate, workmins)    
         
         return maint_globals.SUCCESS, ""
                 
