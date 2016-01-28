@@ -20,7 +20,9 @@ All fields are optional except database and action. The verbose flag is only int
 Inputs: all fields are optional except database and action.
 `
 -h <hostname or IP address> 
+
 -d <database> 
+
 -n <schema>
 -p <PORT>
 -u <db user>
