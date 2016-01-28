@@ -85,7 +85,7 @@ For analyze and vacuum analyze:
 
 For vacuum freeze:
 
-1. Refresh tables where current high XID age divided by autovacuum_freeze_max_age > 80%.
+1. Refresh tables where current high XID age divided by autovacuum_freeze_max_age > 85%.
 
 ## Report logic
 1.  Cache Hit Ratio
