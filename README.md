@@ -23,19 +23,30 @@ Inputs: all fields are optional except database and action.
 <br/>
 `-d <database> `
 <br/>
--n <schema>
--p <PORT>
--u <db user>
--l <load threshold>
--w <max rows> 
--o <work window in minutes> 
--e <max .ready files> 
--a <action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT>
--m [html format flag] 
--r [dry run flag] 
--s [smart mode flag] 
--v [verbose output flag, mostly used for debugging]
-`
+`-n <schema>`
+<br/>
+`-p <PORT>`
+<br/>
+`-u <db user>`
+<br/>
+`-l <load threshold>`
+<br/>
+`-w <max rows> `
+<br/>
+`-o <work window in minutes> `
+<br/>
+`-e <max .ready files> `
+<br/>
+`-a <action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT>`
+<br/>
+`-m [html format flag] `
+<br/>
+`-r [dry run flag] `
+<br/>
+`-s [smart mode flag] `
+<br/>
+`-v [verbose output flag, mostly used for debugging]`
+<br/>
 ## Examples
 vacuum analyze for all user tables in the database but only if load is less than 20% and rows < 1 mil
 
