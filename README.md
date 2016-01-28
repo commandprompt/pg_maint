@@ -22,6 +22,7 @@ Inputs: all fields are optional except database and action.
 `-h <hostname or IP address> `
 <br/>
 `-d <database> `
+<br/>
 -n <schema>
 -p <PORT>
 -u <db user>
