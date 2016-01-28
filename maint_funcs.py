@@ -85,7 +85,7 @@ class maint:
         self.unusedindexes     = False
         self.freezecandidates  = False
         self.analyzecandidates = False
-        self.workwindowmins    = 7200  # default max is 5 days
+        self.workwindowmins    = 180  # default max is 3 hours
         self.max_ready_files   = 1000
         self.timestartmins     = time.time() / 60
        
@@ -553,7 +553,7 @@ class maint:
             LOAD = results.split('\n')
             LOADR = int(LOAD[1])
         
-        return maint_globals.SUCCESS, LOADR
+        return maint_globals.SUCCESS, str(LOADR)
 
     ###########################################################
     def check_load(self):
@@ -566,6 +566,7 @@ class maint:
             return rc, results
             
         load = Decimal(results)
+        
         if load > self.load_threshold:
             return maint_globals.HIGHLOAD, "Current load (%.2f%%) > Threshold load (%d%%)" % (load, self.load_threshold)
         else:
@@ -1590,10 +1591,8 @@ class maint:
             rc, results = self.check_load()
             if rc == maint_globals.HIGHLOAD:
                 # wait 10 minutes before trying again
-                # print "deferring action (%s) for 10 minutes due to high load.  %s" % (self.action, results)
-                # time.sleep(600)
-                print "deferring action (%s) for 30 seconds due to high load (%s).  Current work time minutes(%d) Max work time minutes (%d)" % (self.action, results, workmins, self.workwindowmins)
-                time.sleep(30)                
+                print "deferring action (%s) for 10 minutes due to high load.  %s" % (self.action, results)
+                time.sleep(600)
                 continue
             elif freeze:
                 # make sure we aren't getting too far behind in WALs ready to be archived.
@@ -1606,8 +1605,8 @@ class maint:
                     
                 readycnt = int(results)
                 if readycnt > self.max_ready_files:
-                    print "deferring action (%s) for 30 seconds due to high cnt of files waiting to be archived (%d)." % readycnt
-                    time.sleep(30)                
+                    print "deferring action (%s) for 10 minutes due to high load.  %s" % (self.action, results)
+                    time.sleep(600)
                     continue
                 else:
                     break
@@ -1656,8 +1655,12 @@ class maint:
             elif self.action == 'VACUUM_FREEZE':
                 # testing SQL -->
                 # WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select s.setting, n.nspname as schema, c.relname as table, age(c.relfrozenxid) as xid_age, pg_size_pretty(pg_table_size(c.oid)) as table_size, round((age(c.relfrozenxid)::float / s.setting::float) * 100) as pct from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' and pg_table_size(c.oid) > 1073741824 ORDER BY age(c.relfrozenxid) DESC LIMIT 20;
-                sql="WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select '%s ' || n.nspname || '.' || c.relname || ';' as ddl from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' %s and c.reltuples < %d and pg_table_size(c.oid) > 1073741824 and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 70  ORDER BY age(c.relfrozenxid) desc" \
-                % (self.actstring, self.schemaclause, self.max_rows) 
+                # WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select s.setting, n.nspname as schema, c.relname as table, age(c.relfrozenxid) as xid_age, pg_size_pretty(pg_table_size(c.oid)) as table_size, round((age(c.relfrozenxid)::float / s.setting::float) * 100) as pct from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r'  and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 85 ORDER BY age(c.relfrozenxid) DESC LIMIT 20;
+                # note to avoid tracking down the database with the table that has the highest xid age, just do it regardless of the size of the table being over a gigabyte
+                # sql="WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select '%s ' || n.nspname || '.' || c.relname || ';' as ddl from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' %s and c.reltuples < %d and pg_table_size(c.oid) > 1073741824 and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 85  ORDER BY age(c.relfrozenxid) desc" \
+                # % (self.actstring, self.schemaclause, self.max_rows) 
+                sql="WITH settings AS (select s.setting from pg_settings s where s.name = 'autovacuum_freeze_max_age') select '%s ' || n.nspname || '.' || c.relname || ';' as ddl from settings s, pg_class c, pg_namespace n WHERE n.oid = c.relnamespace and c.relkind = 'r' %s and c.reltuples < %d and round((age(c.relfrozenxid)::float / s.setting::float) * 100) > 85  ORDER BY age(c.relfrozenxid) desc" \
+                % (self.actstring, self.schemaclause, self.max_rows)                 
 
         else:
             sql="select '%s ' || n.nspname || '.' || c.relname || ';' as ddl from pg_namespace n, pg_class c, pg_tables t, pg_stat_user_tables u where t.schemaname = n.nspname and t.tablename = c.relname and c.relname = u.relname %s and n.nspname not in ('information_schema','pg_catalog') and c.reltuples between 1 and %d order by n.nspname, c.relname" \
