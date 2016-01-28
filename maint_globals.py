@@ -43,10 +43,12 @@ ERROR3    = -3
 WARNING   = -4
 DEFERRED  = 1
 NOTICE    = 2
+TOOLONG   = 3
+HIGHLOAD  = 4
 
 DESCRIPTION="This python utility program performs PostgreSQL maintenance tasks."
 VERSION    = 1.0
 PROGNAME   = "pg_maint"
-ADATE      = "January 25, 2016"
+ADATE      = "January 28, 2016"
 
 
