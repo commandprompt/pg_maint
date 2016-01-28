@@ -18,6 +18,7 @@ Bugs can be reported @ https://public.commandprompt.com/projects/pgmaint
 All fields are optional except database and action. The verbose flag is only intended as a debugging feature.
 
 Inputs: all fields are optional except database and action.
+
 `-h <hostname or IP address> `
 
 `-d <database> `
