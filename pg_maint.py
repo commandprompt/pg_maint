@@ -28,8 +28,20 @@
 # Description: This python utility program performs PostgreSQL maintenance tasks.
 #
 # Inputs: all fields are optional except database and action.
-# -h <hostname or IP address> -d <database> -n <schema> -p <PORT> -t <type> -u <db user> -l <load threshold> -w <max rows> 
-# -a [action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT] -m [html format] -r [dry run] -s [smart mode] -v [verbose output]
+# -h <hostname or IP address> 
+# -d <database> 
+# -n <schema>
+# -p <PORT>
+# -u <db user>
+# -l <load threshold>
+# -w <max rows> 
+# -o <work window in minutes> 
+# -e <max .ready files> 
+# -a <action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT>
+# -m [html format flag] 
+# -r [dry run flag] 
+# -s [smart mode flag] 
+# -v [verbose output flag, mostly used for debugging]
 #
 # Examples:
 #
@@ -77,7 +89,7 @@
 #    View cron job output: view /var/log/cron
 #    source the database environment: source ~/db_catalog.ksh
 #    Example cron job that does smart analyze commands for entire database every month at midnight:
-#    0 0 1 * * /usr/bin/python /path to file/python pg_maint.py -t smart -a analyze >> /my log path/pg_maint_`/bin/date +'\%Y\%m\%d'`.log
+#    0 0 1 * * /usr/bin/python /path to file/pg_maint.py -a analyze -s -l 40 >> /my log path/pg_maint_`/bin/date +'\%Y\%m\%d'`.log 2>&1
 #
 # NOTE: You may have to source the environment variables file in the crontab to get this program to work.
 #          #!/bin/bash
@@ -94,14 +106,7 @@
 #  8. list tables that have not been analyzed or vacuumed in the last 60 days or whose size has grown significantly. 
 #
 # TODOs:
-#    1. jd: we want pg_maint to optionally work with pg_agent to create a job to do vacuum freeze
-#       so we could say pg_maint --vacuum-freeze --schedule '01/20/2015 2:00AM';
-#       and pg_agent would schedule that 
-#       including the following would be awesome pg_maint --report --html 
-#       also consider driving it not by parms but by ini file
-#       [db01]
-#       database: mydb
-#       action: vacuum_freeze
+#
 #
 # History:
 # who did it            Date            did what
@@ -113,6 +118,13 @@
 # Michael Vitale        01/18/2016      Fixed a bunch of bugs with html reporting
 # Michael Vitale        01/20/2016      Removed linux dependency on psutils module. 
 #                                       Enhanced unused indexes report to query slaves if available
+# Michael Vitale        01/21/2016      Fixed bugs, normalized html output, added connection and locking report
+# Michael Vitale        01/23/2016      Reworked html output to display health check at top of page and lists at the bottom.
+# Michael Vitale        01/25/2016      Added more health check items: writers, network standbys.  Implemented logic related to
+#                                       checkpoint, background and backend writers and the pg_stat_bgwriter table.
+# Michael Vitale        01/27/2016      loop over tables being worked on, instead of executing
+#                                       them in batch: analyze, vacuum analyze, and vacuum freeze actions.
+# Michael Vitale        01/28/2016      Fixed python piping to use bash as default shell
 ################################################################################################################
 import string, sys, os, time, datetime, exceptions
 from decimal import *
@@ -131,7 +143,7 @@ from maint_funcs import *
 #############################################################################################
 def setupOptionParser():
     parser = OptionParser(add_help_option=False, description=maint_globals.DESCRIPTION)
-    parser.add_option("-a", "--action",         dest="action",   help="Action to perform. Values are: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE",  default="",metavar="ACTION")
+    parser.add_option("-a", "--action",         dest="action",   help="Action to perform. Values are: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT",  default="",metavar="ACTION")
     parser.add_option("-h", "--dbhost",         dest="dbhost",   help="DB Host Name or IP",                     default="",metavar="DBHOST")
     parser.add_option("-p", "--port",           dest="dbport",   help="db host port",                           default="",metavar="DBPORT")
     parser.add_option("-u", "--dbuser",         dest="dbuser",   help="db host user",                           default="",metavar="DBUSER")
@@ -140,6 +152,8 @@ def setupOptionParser():
     parser.add_option("-s", "--smart_mode",     dest="smart_mode", help="Smart Mode",                           default=False, action="store_true")    
     parser.add_option("-l", "--load_threshold", dest="load_threshold", help="Load Threshold",                   default="",metavar="LOAD_THRESHOLD")        
     parser.add_option("-w", "--max_rows",       dest="max_rows", help="Max Rows",                               default="",metavar="MAX_ROWS")            
+    parser.add_option("-o", "--work_window",    dest="work_window", help="Work Window Max in mins.",            default="",metavar="WORK_WINDOW")            
+    parser.add_option("-e", "--max_ready_files",dest="max_ready_files", help="Maximum .Ready Files",            default="",metavar="MAX_READY_FILES")
     parser.add_option("-m", "--html",           dest="html", help="html report format",                         default=False, action="store_true")    
     parser.add_option("-r", "--dry_run",        dest="dry_run", help="Dry Run Only",                            default=False, action="store_true")    
     parser.add_option("-v", "--verbose",        dest="verbose", help="Verbose Output",                          default=False, action="store_true")                   
@@ -160,7 +174,7 @@ pg = maint()
 
 # Load and validate parameters
 rc, errors = pg.set_dbinfo(options.action, options.dbhost, options.dbport, options.dbuser, options.database, options.schema, \
-                           options.smart_mode, options.load_threshold, options.max_rows, options.html, options.dry_run, options.verbose, sys.argv)
+                           options.smart_mode, options.load_threshold, options.max_rows, options.work_window, options.max_ready_files, options.html, options.dry_run, options.verbose, sys.argv)
 if rc <> maint_globals.SUCCESS:
     print errors
     optionParser.print_help()
@@ -172,19 +186,17 @@ rc, results = pg.get_pgversion()
 
 print "%s  version: %.1f  %s\n\n" % (maint_globals.PROGNAME, maint_globals.VERSION, maint_globals.ADATE)
 
-rc, results = pg.check_load()
-if rc <> maint_globals.SUCCESS:
-    print results
-    sys.exit(1)
+# deferring load check to load intensive actions
+#rc, results = pg.check_load()
 
 rc, results = pg.do_vac_and_analyze()
 if rc < maint_globals.SUCCESS:
-    # print results
+    pg.cleanup()
     sys.exit(1)
 
 rc, results = pg.do_report()
 if rc < maint_globals.SUCCESS:
-    # print results
+    pg.cleanup()
     sys.exit(1)
 
 pg.cleanup()
