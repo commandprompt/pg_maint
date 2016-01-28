@@ -18,10 +18,9 @@ Bugs can be reported @ https://public.commandprompt.com/projects/pgmaint
 All fields are optional except database and action. The verbose flag is only intended as a debugging feature.
 
 Inputs: all fields are optional except database and action.
+`
 -h <hostname or IP address> 
-
 -d <database> 
-
 -n <schema>
 -p <PORT>
 -u <db user>
@@ -34,7 +33,7 @@ Inputs: all fields are optional except database and action.
 -r [dry run flag] 
 -s [smart mode flag] 
 -v [verbose output flag, mostly used for debugging]
-
+`
 ## Examples
 vacuum analyze for all user tables in the database but only if load is less than 20% and rows < 1 mil
 
