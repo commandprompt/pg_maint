@@ -17,7 +17,21 @@ Bugs can be reported @ https://public.commandprompt.com/projects/pgmaint
 ## Inputs
 All fields are optional except database and action. The verbose flag is only intended as a debugging feature.
 
-`-h <hostname or IP address> -d <database> -n <schema> -p <PORT> -u <db user> -l <load threshold> -w <max rows> -a [action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT] -r [dry run] -s [smart mode] -v [verbose output]`
+Inputs: all fields are optional except database and action.
+-h <hostname or IP address> 
+-d <database> 
+-n <schema>
+-p <PORT>
+-u <db user>
+-l <load threshold>
+-w <max rows> 
+-o <work window in minutes> 
+-e <max .ready files> 
+-a <action: ANALYZE, VACUUM_ANALYZE, VACUUM_FREEZE, REPORT>
+-m [html format flag] 
+-r [dry run flag] 
+-s [smart mode flag] 
+-v [verbose output flag, mostly used for debugging]
 
 ## Examples
 vacuum analyze for all user tables in the database but only if load is less than 20% and rows < 1 mil
