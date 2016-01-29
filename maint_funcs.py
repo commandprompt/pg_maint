@@ -81,6 +81,7 @@ class maint:
         self.programdir        = ''
         self.imageURL          = "https://cloud.githubusercontent.com/assets/339156/12404356/c5c9f374-be08-11e5-8cfb-2ab6df0eb4b0.jpg"
         self.slaves            = []
+        self.in_recovery       = False
         self.bloatedtables     = False
         self.unusedindexes     = False
         self.freezecandidates  = False
@@ -588,7 +589,19 @@ class maint:
             self.writeout(aline)
             return rc, errors     
         self.slaves = results.split('\n')
-            
+        
+        # Also check whether this cluster is a master or slave
+        # self.in_recovery
+        sql = "select pg_is_in_recovery()"
+        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
+        rc, results = self.executecmd(cmd, False)
+        if rc <> maint_globals.SUCCESS:
+	    errors = "Unable to get master/slave status: %d %s\nsql=%s\n" % (rc, results, sql)
+            aline = "%s" % (errors)         
+            self.writeout(aline)
+            return rc, errors     
+        self.in_recovery = True if results == 't' else False
+
         return maint_globals.SUCCESS, ""        
 
 
@@ -1388,23 +1401,31 @@ class maint:
         ########################
         # orphaned large objects	    
         ########################
-        if self.dbuser == '':
-            user_clause = " "
-        else:
-            user_clause = " -U %s " % self.dbuser
-            
-        cmd = "%s/vacuumlo -n %s %s" % (self.pgbindir, user_clause, self.database)
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get orphaned large objects: %d %s\ncmd=%s\n" % (rc, results, cmd)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        
-        # expecting substring like this --> "Would remove 35 large objects from database "agmednet.core.image"."
-        numobjects = (results.split("Would remove"))[1].split("large objects")[0]
 
-        if int(numobjects) == 0:
+        if self.in_recovery:
+            #NOTE: cannot run this against slaves since vacuumlo will attempt to create temp table        
+            numobjects = "-1"
+        else:
+            if self.dbuser == '':
+                user_clause = " "
+            else:
+                user_clause = " -U %s " % self.dbuser
+        
+            cmd = "%s/vacuumlo -n %s %s" % (self.pgbindir, user_clause, self.database)        
+            rc, results = self.executecmd(cmd, False)
+            if rc <> maint_globals.SUCCESS:
+    	        errors = "Unable to get orphaned large objects: %d %s\ncmd=%s\n" % (rc, results, cmd)
+                aline = "%s" % (errors)         
+                self.writeout(aline)
+                return rc, errors     
+        
+            # expecting substring like this --> "Would remove 35 large objects from database "agmednet.core.image"."
+            numobjects = (results.split("Would remove"))[1].split("large objects")[0]
+
+        if int(numobjects) == -1:
+            msg = "N/A: Unable to detect orphaned large objects on slaves."
+            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Orphaned Large Objects</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"                    
+        elif int(numobjects) == 0:
             msg = "No orphaned large objects were found."
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Orphaned Large Objects</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
         else:
