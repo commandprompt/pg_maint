@@ -1191,7 +1191,7 @@ class maint:
             return rc, errors     
         blocked_queries_cnt = int(results)
             
-        if long_queries_cnt == 0:
+        if blocked_queries_cnt == 0:
             msg = "No \"Waiting/Blocked queries\" longer than 30 seconds were detected."
             html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Waiting/Blocked queries</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
         else:
