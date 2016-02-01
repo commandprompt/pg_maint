@@ -380,24 +380,6 @@ class maint:
                 p = Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
             values, err = p.communicate()            
             
-        except exceptions.OSError as e:
-            print "exceptions.OSError Error",e
-            return maint_globals.ERROR, "Error(1)"         
-        except BaseException as e:
-            print "BaseException Error",e
-            return maint_globals.ERROR, "Error(2)"            
-        except OSError as e:
-            print "OSError Error", e
-            return maint_globals.ERROR, "Error(3)"    
-        except RuntimeError as e:
-            print "RuntimeError", e
-            return maint_globals.ERROR, "Error(4)"      
-        except ValueError as e:
-            print "Value Error", e
-            return maint_globals.ERROR, "Error(5)"              
-        except Exception as e:
-            print "General Exception Error", e
-            return maint_globals.ERROR, "Error(6)"    
         except:
             print "Unexpected error:", sys.exc_info()[0]
             return maint_globals.ERROR, "Error(7)"    
@@ -1065,34 +1047,6 @@ class maint:
             self.appendreport(html)            
         '''
         
-        ##################### 
-        # get cache hit ratio
-        #####################
-        # SELECT datname, blks_read, blks_hit, round((blks_hit::float/(blks_read+blks_hit+1)*100)::numeric, 2) as cachehitratio FROM pg_stat_database ORDER BY datname, cachehitratio
-        sql = "SELECT blks_read, blks_hit, round((blks_hit::float/(blks_read+blks_hit+1)*100)::numeric, 2) as cachehitratio FROM pg_stat_database where datname = '%s' ORDER BY datname, cachehitratio" % self.database
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-            errors = "Unable to get database cache hit ratio: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-	cols = results.split('|')
-	blks_read   = int(cols[0].strip())
-	blks_hit    = int(cols[1].strip())
-	cache_ratio = Decimal(cols[2].strip())
-        if cache_ratio < Decimal('70.0'):
-            msg = "low cache hit ratio: %.2f (blocks hit vs blocks read)" % cache_ratio
-            html = "<tr><td width=\"5%\"><font color=\"red\">&#10004;</font></td><td width=\"20%\"><font color=\"red\">Cache Hit Ratio</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"
-        elif cache_ratio < Decimal('90.0'):
-            msg = "Moderate cache hit ratio: %.2f (blocks hit vs blocks read)" % cache_ratio
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Cache Hit Ratio</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
-        else:
-            msg = "High cache hit ratio: %.2f (blocks hit vs blocks read)" % cache_ratio
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Cache Hit Ratio</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
-        if self.html_format:            
-            self.appendreport(html)
-        print msg
 
 
         ######################################################
@@ -1153,67 +1107,6 @@ class maint:
         if self.html_format:            
             self.appendreport(html)
         print msg
-
-
-        ######################################
-        # Get long running queries > 5 minutes
-        ######################################
-        # NOTE: 9.1 uses procpid, current_query, and no state column, but 9.2+ uses pid, query and state columns respectively.  Also idle is <IDLE> in current_query for 9.1 and less
-        #       <IDLE> in transaction for 9.1 but idle in transaction for state column in 9.2+
-        if self.pgversion < Decimal('9.2'):
-            # select procpid,datname,usename, client_addr, now(), query_start, substring(current_query,1,100), now() - query_start as duration from pg_stat_activity where current_query not ilike '<IDLE%' and current_query <> ''::text and now() - query_start > interval '5 minutes';
-            sql = "select count(*) from pg_stat_activity where current_query not ilike '<IDLE%' and current_query <> ''::text and now() - query_start > interval '5 minutes'"
-        else:
-            # select pid,datname,usename, client_addr, now(), state, query_start, substring(query,1,100), now() - query_start as duration from pg_stat_activity where state not ilike 'idle%' and query <> ''::text and now() - query_start > interval '5 minutes';
-            sql = "select count(*) from pg_stat_activity where state not ilike 'idle%' and query <> ''::text and now() - query_start > interval '5 minutes'"
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-            errors = "Unable to get count of long running queries: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        long_queries_cnt = int(results)
-            
-        if long_queries_cnt == 0:
-            msg = "No \"long running queries\" longer than 5 minutes were detected."
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Long Running Queries</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
-        else:
-            msg = "%d \"long running queries\" longer than 5 minutes were detected." % long_queries_cnt
-            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Long Running Queries</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
-        if self.html_format:            
-            self.appendreport(html)
-        print msg
-
-        
-        ##########################################################
-        # Get lock waiting transactions where wait is > 30 seconds
-        ##########################################################
-        if self.pgversion < Decimal('9.2'):
-          # select procpid, datname, usename, client_addr, now(), query_start, substring(current_query,1,100), now() - query_start as duration from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds';
-            sql = "select count(*) from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds'"
-        else:
-          # select pid, datname, usename, client_addr, now(), query_start, substring(query,1,100), now() - query_start as duration from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds';
-            sql = "select count(*) from pg_stat_activity where waiting is true and now() - query_start > interval '30 seconds'"        
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)    
-        rc, results = self.executecmd(cmd, False)
-        if rc <> maint_globals.SUCCESS:
-            errors = "Unable to get count of blocked queries: %d %s\nsql=%s\n" % (rc, results, sql)
-            aline = "%s" % (errors)         
-            self.writeout(aline)
-            return rc, errors     
-        blocked_queries_cnt = int(results)
-            
-        if blocked_queries_cnt == 0:
-            msg = "No \"Waiting/Blocked queries\" longer than 30 seconds were detected."
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Waiting/Blocked queries</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"
-        else:
-            msg = "%d \"Waiting/Blocked queries\" longer than 30 seconds were detected." % blocked_queries_cnt
-            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Waiting/Blocked queries</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
-        if self.html_format:            
-            self.appendreport(html)
-        print msg
-
 
         #################################
         # get archiving info if available
@@ -1299,142 +1192,7 @@ class maint:
         print msg
         if self.html_format:
             self.appendreport(html)
-       
-       
-        ###############################################################################################################
-        # Check for checkpoint frequency
-        # NOTE: Checkpoints should happen every few minutes, not less than 5 minutes and not more than 15-30 minutes
-        #       unless recovery time is not a priority and High I/O SQL workload is in which case 1 hour is reasonable.
-        ###############################################################################################################
-        sql = "SELECT total_checkpoints, seconds_since_start / total_checkpoints / 60 AS minutes_between_checkpoints, checkpoints_timed, checkpoints_req, checkpoint_write_time, checkpoint_sync_time FROM (SELECT EXTRACT(EPOCH FROM (now() - pg_postmaster_start_time())) AS seconds_since_start, (checkpoints_timed+checkpoints_req) AS total_checkpoints, checkpoints_timed, checkpoints_req, checkpoint_write_time / 1000 as checkpoint_write_time, checkpoint_sync_time / 1000 as checkpoint_sync_time FROM pg_stat_bgwriter) AS sub"
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
-	rc, results = self.executecmd(cmd, False)
-	if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get checkpoint frequency: %d %s\nsql=%s\n" % (rc, results, sql)
-	    aline = "%s" % (errors)         
-	    self.writeout(aline)
-	    return rc, errors     
-
-	cols = results.split('|')
-	total_checkpoints     = int(cols[0].strip())
-	minutes               = Decimal(cols[1].strip())
-	checkpoints_timed     = int(cols[2].strip())
-	checkpoints_req       = int(cols[3].strip())
-        checkpoint_write_time = int(float(cols[4].strip()))
-        checkpoint_sync_time  = int(float(cols[5].strip()))        \
-        # calculate average checkpoint time
-        avg_checkpoint_seconds = ((checkpoint_write_time + checkpoint_sync_time) / (checkpoints_timed + checkpoints_req)) 
-	
-        if minutes < Decimal('5.0'):
-            msg = "Checkpoints are occurring too fast, every %.2f minutes, and taking about %d minutes on average." % (minutes, (avg_checkpoint_seconds / 60))
-            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
-        elif minutes > Decimal('60.0'):
-            msg = "Checkpoints are occurring too infrequently, every %.2f minutes, and taking about %d minutes on average." % (minutes, (avg_checkpoint_seconds / 60))
-            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"                        
-        else:
-            msg = "Checkpoints are occurring every %.2f minutes, and taking about %d minutes on average." % (minutes, (avg_checkpoint_seconds / 60))
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Checkpoint Frequency</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"   
-            
-        print msg
-        if self.html_format:
-            self.appendreport(html)
-
-        ############################################################
-        # Check checkpoints, background writers, and backend writers
-        ############################################################
-        sql = "select checkpoints_timed, checkpoints_req, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc, checkpoint_write_time / 1000 as checkpoint_write_time, checkpoint_sync_time / 1000 as checkpoint_sync_time, (100 * checkpoints_req) / (checkpoints_timed + checkpoints_req) AS checkpoints_req_pct,    pg_size_pretty(buffers_checkpoint * block_size / (checkpoints_timed + checkpoints_req)) AS avg_checkpoint_write,  pg_size_pretty(block_size * (buffers_checkpoint + buffers_clean + buffers_backend)) AS total_written,  100 * buffers_checkpoint / (buffers_checkpoint + buffers_clean + buffers_backend) AS checkpoint_write_pct,    100 * buffers_clean / (buffers_checkpoint + buffers_clean + buffers_backend) AS background_write_pct, 100 * buffers_backend / (buffers_checkpoint + buffers_clean + buffers_backend) AS backend_write_pct from pg_stat_bgwriter, (SELECT cast(current_setting('block_size') AS integer) AS block_size) bs"
-
-        cmd = "psql %s -t -c \"%s\"" % (self.connstring, sql)
-	rc, results = self.executecmd(cmd, False)
-	if rc <> maint_globals.SUCCESS:
-	    errors = "Unable to get background/backend writers: %d %s\nsql=%s\n" % (rc, results, sql)
-	    aline = "%s" % (errors)         
-	    self.writeout(aline)
-	    return rc, errors     
-
-	cols = results.split('|')
-        checkpoints_timed     = int(cols[0].strip())
-        checkpoints_req       = int(cols[1].strip())
-        buffers_checkpoint    = int(cols[2].strip())
-        buffers_clean         = int(cols[3].strip())
-        maxwritten_clean      = int(cols[4].strip())
-        buffers_backend       = int(cols[5].strip())
-        buffers_backend_fsync = int(cols[6].strip())
-        buffers_alloc         = int(cols[7].strip())
-        checkpoint_write_time = int(float(cols[8].strip()))
-        checkpoint_sync_time  = int(float(cols[9].strip()))
-        checkpoints_req_pct   = int(cols[10].strip())
-        avg_checkpoint_write  = cols[11].strip()
-        total_written         = cols[12].strip()
-        checkpoint_write_pct  = int(cols[13].strip())
-        background_write_pct  = int(cols[14].strip())
-        backend_write_pct     = int(cols[15].strip())        
-        
-        # calculate average checkpoint time
-        avg_checkpoint_seconds = ((checkpoint_write_time + checkpoint_sync_time) / (checkpoints_timed + checkpoints_req)) 
-
-        if self.verbose:
-            msg = "chkpt_time=%d chkpt_req=%d  buff_chkpt=%d  buff_clean=%d  maxwritten_clean=%d  buff_backend=%d  buff_backend_fsync=%d  buff_alloc=%d, chkpt_req_pct=%d avg_chkpnt_write=%s total_written=%s chkpnt_write_pct=%d background_write_pct=%d  backend_write_pct=%d avg_checkpoint_time=%d seconds" \
-            % (checkpoints_timed, checkpoints_req, buffers_checkpoint, buffers_clean, maxwritten_clean, buffers_backend, buffers_backend_fsync, buffers_alloc, checkpoints_req_pct, avg_checkpoint_write, total_written, checkpoint_write_pct, background_write_pct, backend_write_pct, avg_checkpoint_seconds)
-            print msg        
-        
-        msg = ''
-        if buffers_backend_fsync > 0:
-            msg = "bgwriter fsync request queue is full. Backend using fsync.  "
-        if backend_write_pct > (checkpoint_write_pct + background_write_pct):
-            msg += "backend writer doing most of the work.  Consider decreasing \"bgwriter_delay\" by 50% or more to make background writer do more of the work.  "
-        if maxwritten_clean > 500000:            
-            # for now just use a hard coded value of 500K til we understand the math about this better
-            msg += "background writer stopped cleaning scan %d times because it had written too many buffers.  Consider increasing \"bgwriter_lru_maxpages\".  " % maxwritten_clean
-        if checkpoints_timed > (checkpoints_req * 5):
-            msg += "\"checkpoint_timeout\" contributing to a lot more checkpoints (%d) than \"checkpoint_segments\" (%d).  Consider increasing \"checkpoint_timeout\".  " % (checkpoints_timed, checkpoints_req)
-        if msg <> '':
-            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Checkpoint/Background/Backend Writers</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            
-        else:
-            msg = "No problems detected with checkpoint, background, or backend writers."
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Checkpoint/Background/Backend Writers</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"   
-
-        print msg
-        if self.html_format:
-            self.appendreport(html)
-
-        ########################
-        # orphaned large objects	    
-        ########################
-
-        if self.in_recovery:
-            #NOTE: cannot run this against slaves since vacuumlo will attempt to create temp table        
-            numobjects = "-1"
-        else:
-            if self.dbuser == '':
-                user_clause = " "
-            else:
-                user_clause = " -U %s " % self.dbuser
-        
-            cmd = "%s/vacuumlo -n %s %s" % (self.pgbindir, user_clause, self.database)        
-            rc, results = self.executecmd(cmd, False)
-            if rc <> maint_globals.SUCCESS:
-    	        errors = "Unable to get orphaned large objects: %d %s\ncmd=%s\n" % (rc, results, cmd)
-                aline = "%s" % (errors)         
-                self.writeout(aline)
-                return rc, errors     
-        
-            # expecting substring like this --> "Would remove 35 large objects from database "agmednet.core.image"."
-            numobjects = (results.split("Would remove"))[1].split("large objects")[0]
-
-        if int(numobjects) == -1:
-            msg = "N/A: Unable to detect orphaned large objects on slaves."
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Orphaned Large Objects</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"                    
-        elif int(numobjects) == 0:
-            msg = "No orphaned large objects were found."
-            html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Orphaned Large Objects</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
-        else:
-            msg = "%d orphaned large objects were found.  Consider running vacuumlo to remove them." % int(numobjects)        
-            html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Orphaned Large Objects</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
-
-        print msg            
-        if self.html_format:
-            self.appendreport(html)
+      
 
         ##################################
         # Check for bloated tables/indexes
@@ -1538,51 +1296,6 @@ class maint:
         print msg            
         if self.html_format:
             self.appendreport(html)
-
-
-        #######################################
-        # network health checks begin here
-        # ONLY applies to linux at current time
-        #######################################
-        
-        if self.opsys == 'posix':
-
-
-            # Check for high number of standby connections, i.e., TIME_WAIT states
-            # This usually indicates a lot of short-lived connections and the absence of a connection pooler
-            '''
-            Due to the way TCP/IP works, connections can not be closed immediately. Packets may arrive out of order or be retransmitted after the connection has been closed. CLOSE_WAIT indicates that the remote endpoint (other side of the connection) has closed the connection. TIME_WAIT indicates that local endpoint (this side) has closed the connection. The connection is being kept around so that any delayed packets can be matched to the connection and handled appropriately. The connections will be removed when they time out within four minutes.  Basically the "WAIT" states mean that one side closed the connection but the final confirmation of the close is pending.
-	    
-	    ss -an state time-wait | wc -l
-	    netstat -nat | egrep 'TIME_WAIT' | wc -l
-	    netstat -ntu  | grep TIME_WAIT | wc -l
-	    
-	    Now, let's see why this state can be annoying on a server handling a lot of connections. There are three aspects of the problem:
-	    the slot taken in the connection table preventing new connections of the same kind,
-	    the memory occupied by the socket structure in the kernel, and
-	    the additional CPU usage.
-	    A connection in the TIME-WAIT state is kept for one minute in the connection table. This means, another connection with the same quadruplet (source address, source port, destination address, destination port) cannot exist.
-	    The result of ss -tan state time-wait | wc -l is not a problem per se!
-            '''
-            
-            cmd =  "ss -an state time-wait | wc -l"
-            rc, results = self.executecmd(cmd, False)
-            if rc <> maint_globals.SUCCESS:
-    	        errors = "Unable to get network standby connections count: %d %s\nsql=%s\n" % (rc, results, sql)
-                aline = "%s" % (errors)         
-                self.writeout(aline)
-                return rc, errors     
-            standby = int(results)
-            if standby < 1000:
-                msg = "Network: Relatively few network standby connections (%d)." % standby
-                html = "<tr><td width=\"5%\"><font color=\"blue\">&#10004;</font></td><td width=\"20%\"><font color=\"blue\">Network Standby Connections</font></td><td width=\"75%\"><font color=\"blue\">" + msg + "</font></td></tr>"            
-            else:
-                msg = "Network: High number of standby connections: %d.  This may indicate a lot of short-lived connections and the absence of a connection pooler." % standby
-                html = "<tr><td width=\"5%\"><font color=\"red\">&#10060;</font></td><td width=\"20%\"><font color=\"red\">Network Standby Connections</font></td><td width=\"75%\"><font color=\"red\">" + msg + "</font></td></tr>"            	        
-
-            print msg            
-            if self.html_format:
-                self.appendreport(html)
 
 
         ########################################        
